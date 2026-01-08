@@ -5,39 +5,76 @@ import numpy as np
 import pyrr
 from math import sin, cos, radians
 import random
+from PIL import Image
 
-# Vertex Shader
+# Vertex Shader com suporte a texturas
 vertex_src = """
 # version 330 core
 
 layout(location = 0) in vec3 a_position;
 layout(location = 1) in vec3 a_color;
+layout(location = 2) in vec2 a_texCoord;
 
 uniform mat4 model;
 uniform mat4 view;
 uniform mat4 projection;
 
 out vec3 v_color;
+out vec2 v_texCoord;
 
 void main()
 {
     gl_Position = projection * view * model * vec4(a_position, 1.0);
     v_color = a_color;
+    v_texCoord = a_texCoord;
 }
 """
 
-# Fragment Shader
+# Fragment Shader com suporte a texturas
 fragment_src = """
 # version 330 core
 
 in vec3 v_color;
+in vec2 v_texCoord;
 out vec4 FragColor;
+
+uniform sampler2D texture1;
+uniform bool useTexture;
 
 void main()
 {
-    FragColor = vec4(v_color, 1.0);
+    if (useTexture) {
+        FragColor = texture(texture1, v_texCoord) * vec4(v_color, 1.0);
+    } else {
+        FragColor = vec4(v_color, 1.0);
+    }
 }
 """
+
+def load_texture(path):
+    """Carrega uma textura de imagem"""
+    try:
+        image = Image.open(path)
+        image = image.transpose(Image.FLIP_TOP_BOTTOM)
+        img_data = image.convert("RGB").tobytes()
+        
+        texture = glGenTextures(1)
+        glBindTexture(GL_TEXTURE_2D, texture)
+        
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_REPEAT)
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_REPEAT)
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR)
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR)
+        
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGB, image.width, image.height,
+                     0, GL_RGB, GL_UNSIGNED_BYTE, img_data)
+        glGenerateMipmap(GL_TEXTURE_2D)
+        
+        print(f"✓ Textura carregada: {path}")
+        return texture
+    except Exception as e:
+        print(f"✗ Erro ao carregar textura {path}: {e}")
+        return None
 
 class GameObject:
     def __init__(self, vertices, indices, position, color):
@@ -45,8 +82,9 @@ class GameObject:
         self.vertices = vertices
         self.indices = indices
         self.color = color
-        self.rotation = [0, 0, 0]  # rotação em x, y, z
-        self.scale = [1, 1, 1]  # escala em x, y, z
+        self.rotation = [0, 0, 0]
+        self.scale = [1, 1, 1]
+        self.texture = None
         self.setup_mesh()
     
     def setup_mesh(self):
@@ -54,6 +92,7 @@ class GameObject:
         for i in range(0, len(self.vertices), 3):
             colored_vertices.extend([self.vertices[i], self.vertices[i+1], self.vertices[i+2]])
             colored_vertices.extend(self.color)
+            colored_vertices.extend([0.0, 0.0])  # UV padrão
         
         self.VAO = glGenVertexArrays(1)
         VBO = glGenBuffers(1)
@@ -68,21 +107,24 @@ class GameObject:
         glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, EBO)
         glBufferData(GL_ELEMENT_ARRAY_BUFFER, self.indices.nbytes, self.indices, GL_STATIC_DRAW)
         
+        # Posição
         glEnableVertexAttribArray(0)
-        glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 24, ctypes.c_void_p(0))
+        glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 32, ctypes.c_void_p(0))
         
+        # Cor
         glEnableVertexAttribArray(1)
-        glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, 24, ctypes.c_void_p(12))
+        glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, 32, ctypes.c_void_p(12))
+        
+        # UV
+        glEnableVertexAttribArray(2)
+        glVertexAttribPointer(2, 2, GL_FLOAT, GL_FALSE, 32, ctypes.c_void_p(24))
     
     def get_model_matrix(self):
-        # Criar matriz de transformação
         model = pyrr.matrix44.create_identity()
         
-        # Translação
         model = pyrr.matrix44.multiply(model, 
             pyrr.matrix44.create_from_translation(self.position))
         
-        # Rotação (Y -> X -> Z)
         if self.rotation[1] != 0:
             model = pyrr.matrix44.multiply(model,
                 pyrr.matrix44.create_from_y_rotation(radians(self.rotation[1])))
@@ -93,7 +135,6 @@ class GameObject:
             model = pyrr.matrix44.multiply(model,
                 pyrr.matrix44.create_from_z_rotation(radians(self.rotation[2])))
         
-        # Escala
         model = pyrr.matrix44.multiply(model,
             pyrr.matrix44.create_from_scale(self.scale))
         
@@ -104,23 +145,38 @@ class GameObject:
         glDrawElements(GL_TRIANGLES, len(self.indices), GL_UNSIGNED_INT, None)
 
 class ModelObject:
-    """Classe para carregar modelos .obj manualmente"""
-    def __init__(self, obj_path, position, color=[0.7, 0.7, 0.7], scale=1.0):
+    """Classe para carregar modelos .obj com múltiplas texturas"""
+    def __init__(self, obj_path, position, color=[0.7, 0.7, 0.7], scale=1.0, texture_paths=None):
         self.position = np.array(position, dtype=np.float32)
         self.rotation = [0, 0, 0]
         self.scale = [scale, scale, scale]
         self.color = color
+        self.textures = []  # Lista de texturas
+        self.materials = []  # Lista de materiais com suas geometrias
         
-        # Carregar modelo .obj manualmente
-        vertices, indices = self.load_obj(obj_path)
-        self.vertices = vertices
-        self.indices = indices
-        self.setup_mesh()
+        # Carregar texturas se fornecidas
+        if texture_paths:
+            if isinstance(texture_paths, str):
+                # Uma única textura
+                tex = load_texture(texture_paths)
+                if tex:
+                    self.textures.append(tex)
+            elif isinstance(texture_paths, list):
+                # Múltiplas texturas
+                for tex_path in texture_paths:
+                    tex = load_texture(tex_path)
+                    if tex:
+                        self.textures.append(tex)
+        
+        # Carregar modelo .obj
+        self.load_obj_with_materials(obj_path)
     
-    def load_obj(self, filename):
-        """Carrega arquivo .obj manualmente"""
+    def load_obj_with_materials(self, filename):
+        """Carrega arquivo .obj com múltiplos materiais"""
         vertices = []
-        faces = []
+        tex_coords = []
+        current_material = "default"
+        material_faces = {}  # {material_name: [faces]}
         
         print(f"Carregando modelo: {filename}")
         
@@ -134,26 +190,40 @@ class ModelObject:
                     
                     parts = line.split()
                     
-                    # Vértices (v x y z)
+                    # Vértices
                     if parts[0] == 'v':
                         x, y, z = float(parts[1]), float(parts[2]), float(parts[3])
                         vertices.append([x, y, z])
                     
-                    # Faces (f v1 v2 v3 ou f v1/vt1/vn1 v2/vt2/vn2 v3/vt3/vn3)
+                    # Coordenadas de textura
+                    elif parts[0] == 'vt':
+                        u = float(parts[1])
+                        v = float(parts[2]) if len(parts) > 2 else 0.0
+                        tex_coords.append([u, v])
+                    
+                    # Trocar de material
+                    elif parts[0] == 'usemtl':
+                        current_material = parts[1]
+                        if current_material not in material_faces:
+                            material_faces[current_material] = []
+                    
+                    # Faces
                     elif parts[0] == 'f':
                         face = []
                         for i in range(1, len(parts)):
-                            # Pegar apenas o índice do vértice (ignora textura e normal)
-                            vertex_index = parts[i].split('/')[0]
-                            face.append(int(vertex_index) - 1)  # OBJ usa índice 1-based
+                            indices = parts[i].split('/')
+                            vertex_idx = int(indices[0]) - 1
+                            tex_idx = int(indices[1]) - 1 if len(indices) > 1 and indices[1] else 0
+                            face.append((vertex_idx, tex_idx))
                         
-                        # Triangular faces com mais de 3 vértices
+                        # Triangular e adicionar ao material atual
                         for i in range(1, len(face) - 1):
-                            faces.append([face[0], face[i], face[i + 1]])
+                            material_faces[current_material].append([face[0], face[i], face[i + 1]])
             
-            print(f"✓ Carregados {len(vertices)} vértices e {len(faces)} faces")
+            print(f"✓ Carregados {len(vertices)} vértices, {len(tex_coords)} UVs")
+            print(f"✓ Materiais encontrados: {list(material_faces.keys())}")
             
-            # Calcular centro e tamanho do modelo para normalização
+            # Normalizar vértices
             if vertices:
                 vertices_np = np.array(vertices)
                 min_coords = vertices_np.min(axis=0)
@@ -162,60 +232,83 @@ class ModelObject:
                 size = max_coords - min_coords
                 max_size = max(size)
                 
-                print(f"  Centro: {center}")
-                print(f"  Tamanho: {size}")
-                print(f"  Maior dimensão: {max_size}")
-                
-                # Centralizar modelo
-                # Centralizar e NORMALIZAR modelo
-                
                 for i in range(len(vertices)):
                     vertices[i][0] = (vertices[i][0] - center[0]) / max_size
                     vertices[i][1] = (vertices[i][1] - center[1]) / max_size
                     vertices[i][2] = (vertices[i][2] - center[2]) / max_size
-
             
-            # Converter para arrays numpy
-            vertices_array = []
-            indices_array = []
+            if not tex_coords:
+                tex_coords = [[0.0, 0.0]]
             
-            for face in faces:
-                for vertex_idx in face:
-                    if vertex_idx < len(vertices):
-                        vertices_array.extend(vertices[vertex_idx])
-                        vertices_array.extend(self.color)
-                        indices_array.append(len(indices_array))
-            
-            return (np.array(vertices_array, dtype=np.float32),
-                    np.array(indices_array, dtype=np.uint32))
+            # Criar geometria para cada material
+            for mat_idx, (mat_name, faces) in enumerate(material_faces.items()):
+                vertices_array = []
+                indices_array = []
+                
+                for face in faces:
+                    for vertex_data in face:
+                        vertex_idx, tex_idx = vertex_data
+                        if vertex_idx < len(vertices):
+                            # Posição
+                            vertices_array.extend(vertices[vertex_idx])
+                            # Cor
+                            vertices_array.extend(self.color)
+                            # UV
+                            if tex_idx < len(tex_coords):
+                                vertices_array.extend(tex_coords[tex_idx])
+                            else:
+                                vertices_array.extend([0.0, 0.0])
+                            
+                            indices_array.append(len(indices_array))
+                
+                # Criar VAO para este material
+                vertices_np = np.array(vertices_array, dtype=np.float32)
+                indices_np = np.array(indices_array, dtype=np.uint32)
+                
+                VAO = glGenVertexArrays(1)
+                VBO = glGenBuffers(1)
+                EBO = glGenBuffers(1)
+                
+                glBindVertexArray(VAO)
+                
+                glBindBuffer(GL_ARRAY_BUFFER, VBO)
+                glBufferData(GL_ARRAY_BUFFER, vertices_np.nbytes, vertices_np, GL_STATIC_DRAW)
+                
+                glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, EBO)
+                glBufferData(GL_ELEMENT_ARRAY_BUFFER, indices_np.nbytes, indices_np, GL_STATIC_DRAW)
+                
+                # Posição
+                glEnableVertexAttribArray(0)
+                glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 32, ctypes.c_void_p(0))
+                
+                # Cor
+                glEnableVertexAttribArray(1)
+                glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, 32, ctypes.c_void_p(12))
+                
+                # UV
+                glEnableVertexAttribArray(2)
+                glVertexAttribPointer(2, 2, GL_FLOAT, GL_FALSE, 32, ctypes.c_void_p(24))
+                
+                # Decidir qual textura usar para este material
+                texture_idx = min(mat_idx, len(self.textures) - 1) if self.textures else None
+                
+                self.materials.append({
+                    'name': mat_name,
+                    'VAO': VAO,
+                    'indices_count': len(indices_np),
+                    'texture_idx': texture_idx
+                })
+                
+                print(f"  Material '{mat_name}': {len(faces)} faces, textura #{texture_idx}")
         
         except FileNotFoundError:
             print(f"✗ Arquivo não encontrado: {filename}")
             raise
         except Exception as e:
             print(f"✗ Erro ao carregar modelo: {e}")
+            import traceback
+            traceback.print_exc()
             raise
-    
-    def setup_mesh(self):
-        self.VAO = glGenVertexArrays(1)
-        VBO = glGenBuffers(1)
-        EBO = glGenBuffers(1)
-        
-        glBindVertexArray(self.VAO)
-        
-        glBindBuffer(GL_ARRAY_BUFFER, VBO)
-        glBufferData(GL_ARRAY_BUFFER, self.vertices.nbytes, self.vertices, GL_STATIC_DRAW)
-        
-        glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, EBO)
-        glBufferData(GL_ELEMENT_ARRAY_BUFFER, self.indices.nbytes, self.indices, GL_STATIC_DRAW)
-        
-        # Posição (x, y, z)
-        glEnableVertexAttribArray(0)
-        glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 24, ctypes.c_void_p(0))
-        
-        # Cor (r, g, b)
-        glEnableVertexAttribArray(1)
-        glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, 24, ctypes.c_void_p(12))
     
     def get_model_matrix(self):
         model = pyrr.matrix44.create_identity()
@@ -239,8 +332,65 @@ class ModelObject:
         return model
     
     def draw(self):
-        glBindVertexArray(self.VAO)
-        glDrawElements(GL_TRIANGLES, len(self.indices), GL_UNSIGNED_INT, None)
+        """Desenha todos os materiais do modelo"""
+        for material in self.materials:
+            glBindVertexArray(material['VAO'])
+            glDrawElements(GL_TRIANGLES, material['indices_count'], GL_UNSIGNED_INT, None)
+
+# COLISÃO AABB
+PLAYER_SIZE = np.array([0.8, 0.6, 1.2])   # largura, altura, profundidade
+OBSTACLE_SIZE = np.array([0.8, 0.6, 1.2])
+
+def aabb_collision(posA, sizeA, posB, sizeB):
+    minA = posA - sizeA / 2
+    maxA = posA + sizeA / 2
+
+    minB = posB - sizeB / 2
+    maxB = posB + sizeB / 2
+
+    return (
+        minA[0] <= maxB[0] and maxA[0] >= minB[0] and
+        minA[1] <= maxB[1] and maxA[1] >= minB[1] and
+        minA[2] <= maxB[2] and maxA[2] >= minB[2]
+    )
+
+# DEBUG COLISAO
+def create_hitbox_vao():
+    # Cubo unitário centrado na origem
+    vertices = np.array([
+        -0.5, -0.5, -0.5,
+         0.5, -0.5, -0.5,
+         0.5,  0.5, -0.5,
+        -0.5,  0.5, -0.5,
+        -0.5, -0.5,  0.5,
+         0.5, -0.5,  0.5,
+         0.5,  0.5,  0.5,
+        -0.5,  0.5,  0.5,
+    ], dtype=np.float32)
+
+    indices = np.array([
+        0,1, 1,2, 2,3, 3,0,
+        4,5, 5,6, 6,7, 7,4,
+        0,4, 1,5, 2,6, 3,7
+    ], dtype=np.uint32)
+
+    VAO = glGenVertexArrays(1)
+    VBO = glGenBuffers(1)
+    EBO = glGenBuffers(1)
+
+    glBindVertexArray(VAO)
+
+    glBindBuffer(GL_ARRAY_BUFFER, VBO)
+    glBufferData(GL_ARRAY_BUFFER, vertices.nbytes, vertices, GL_STATIC_DRAW)
+
+    glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, EBO)
+    glBufferData(GL_ELEMENT_ARRAY_BUFFER, indices.nbytes, indices, GL_STATIC_DRAW)
+
+    glEnableVertexAttribArray(0)
+    glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 12, ctypes.c_void_p(0))
+
+    return VAO, len(indices)
+
 
 class NauticRunner:
     def __init__(self):
@@ -267,17 +417,17 @@ class NauticRunner:
         )
         
         # Game state
-        self.player_lane = 1  # 0=esquerda, 1=meio, 2=direita
+        self.player_lane = 1
         self.player_y = 0.0
         self.jumping = False
         self.jump_velocity = 0.0
         self.game_speed = 0.1
         self.score = 0
         self.game_over = False
-        self.using_custom_model = False  # Flag para saber se está usando modelo customizado
+        self.using_custom_model = False
         
-        # Configuração das pistas (lanes)
-        self.lane_positions = [-2.0, 0.0, 2.0]
+        # Configuração das pistas
+        self.lane_positions = [-1.0, 0.0, 1.0]
         
         self.setup_game_objects()
         
@@ -286,40 +436,73 @@ class NauticRunner:
             45, self.width/self.height, 0.1, 100
         )
         
-        # View matrix (câmera atrás do jogador)
+        # View matrix
         self.view = pyrr.matrix44.create_look_at(
             pyrr.Vector3([0, 3, 8]),
             pyrr.Vector3([0, 0, 0]),
             pyrr.Vector3([0, 1, 0])
         )
+
+        self.hitbox_vao, self.hitbox_index_count = create_hitbox_vao()
+        self.show_hitboxes = True
+
+    def draw_hitbox(self, position, size, scale):
+        model = pyrr.matrix44.create_identity()
+
+        model = pyrr.matrix44.multiply(
+            model,
+            pyrr.matrix44.create_from_translation(position)
+        )
+
+        # tamanho da hitbox * escala do objeto
+        final_scale = np.array(size) * np.array(scale)
+
+        model = pyrr.matrix44.multiply(
+            model,
+            pyrr.matrix44.create_from_scale(final_scale)
+        )
+
+        model_loc = glGetUniformLocation(self.shader, "model")
+        use_texture_loc = glGetUniformLocation(self.shader, "useTexture")
+
+        glUniform1i(use_texture_loc, 0)
+        glUniformMatrix4fv(model_loc, 1, GL_FALSE, model)
+
+        glBindVertexArray(self.hitbox_vao)
+        glDrawElements(GL_LINES, self.hitbox_index_count, GL_UNSIGNED_INT, None)
+    
+
+
     
     def setup_game_objects(self):
-        # Tentar carregar modelo externo, caso contrário usar barco padrão
         try:
-            # ALTERE ESTE CAMINHO PARA O SEU ARQUIVO .OBJ
-            model_path = "Boat/boat.obj"  # <-- Coloque o caminho do seu modelo aqui
+            # CONFIGURE AQUI: caminho do modelo e LISTA de texturas
+            model_path = "Boat/boat.obj"
+            
+            # OPÇÃO 1: Múltiplas texturas (uma para cada material)
+            texture_paths = [
+                "Boat/Texture/wood1.jpg",  # Material 1 
+                "Boat/Texture/wood2.jpg",  # Material 2 
+                "Boat/Texture/wood3.jpg",  # Material 3 
+            ]
+            
+            # OPÇÃO 2: Uma única textura para todo o modelo
+            # texture_paths = "Boat/boat_texture.png"
             
             self.player = ModelObject(model_path, 
                                      [self.lane_positions[1], 0, 0], 
-                                     color=[0.6, 0.4, 0.2],  # Cor marrom para barco medieval
-                                     scale=1.3)  # Escala bem pequena - ajuste conforme necessário
+                                     color=[1.0, 1.0, 1.0],
+                                     scale=2.3,
+                                     texture_paths=texture_paths)
             
-            # Ajuste a rotação se necessário
-            # Se os controles estiverem invertidos, ajuste aqui:
-            # - Controles normais: rotation = [0, 0, 0]
-            # - Barco virado 180°: rotation = [0, 180, 0]
-            # - Barco de lado: rotation = [0, 90, 0] ou [0, 270, 0]
-            self.player.rotation = [0, 0, 0]  # <-- AJUSTE AQUI se necessário
-            
+            self.player.rotation = [0, 0, 0]
             self.using_custom_model = True
-            print("✓ Modelo externo carregado com sucesso!")
-            print(f"→ Se os controles estiverem invertidos, ajuste 'rotation' em setup_game_objects()")
+            print("✓ Modelo do jogador carregado com sucesso!")
             
         except Exception as e:
             print(f"✗ Erro ao carregar modelo: {e}")
             print("→ Usando barco padrão...")
             
-            # Barco padrão (caso o modelo não carregue)
             boat_vertices = np.array([
                 -0.4, 0, 0.6,   0.4, 0, 0.6,   0.4, 0, -0.6,  -0.4, 0, -0.6,
                 -0.3, 0.5, 0.4,  0.3, 0.5, 0.4,  0.3, 0.5, -0.4, -0.3, 0.5, -0.4,
@@ -336,7 +519,7 @@ class NauticRunner:
                                     [self.lane_positions[1], 0, 0], [0.2, 0.6, 0.9])
             self.using_custom_model = False
         
-        # Água (plano)
+        # Água
         water_vertices = np.array([
             -10, -0.5, -100,  10, -0.5, -100,
             10, -0.5, 100,   -10, -0.5, 100
@@ -345,51 +528,64 @@ class NauticRunner:
         water_indices = np.array([0,1,2, 0,2,3], dtype=np.uint32)
         self.water = GameObject(water_vertices, water_indices, [0,0,0], [0.0, 0.4, 0.7])
         
-        # Obstáculos (rochas/boias)
+        # Obstáculos
         self.obstacles = []
         self.spawn_obstacle()
     
     def spawn_obstacle(self):
         lane = random.randint(0, 2)
-        z_pos = 80 + random.randint(0, 30)
-
+        z_pos = -80 - random.randint(0, 30)
+        
         try:
-            enemy_model_path = "Boat/boat.obj"  # <-- ajuste o caminho
-
+            enemy_model_path = "untitled.obj"
+            
+            # Mesmas texturas do jogador
+            enemy_texture_paths = [
+                "Boat/Texture/wood1.jpg",  
+                "Boat/Texture/wood2.jpg",  
+                "Boat/Texture/wood3.jpg",
+            ]
+            
+            # Cores para tingir os inimigos
+            colors = [
+                [1.0, 0.5, 0.5],  # Rosa
+                [0.5, 1.0, 0.5],  # Verde claro
+                [1.0, 1.0, 0.5],  # Amarelo claro
+                [0.7, 0.5, 1.0],  # Lilás
+            ]
+            
             obstacle = ModelObject(
                 enemy_model_path,
                 [self.lane_positions[lane], 0, z_pos],
-                color=[0.7, 0.2, 0.2],   # vermelho inimigo
-                scale=1.2               # ajuste fino
+                color=random.choice(colors),
+                scale=2.3,
+                texture_paths=enemy_texture_paths
             )
-
-            # Ajuste de orientação se necessário
+            
             obstacle.rotation = [0, 180, 0]
-
+            
         except Exception as e:
             print("Erro ao carregar modelo inimigo, usando cubo:", e)
-
-            # fallback (se der erro)
+            
             obstacle_vertices = np.array([
                 -0.5,-0.5,0.5,  0.5,-0.5,0.5,  0.5,0.5,0.5,  -0.5,0.5,0.5,
                 -0.5,-0.5,-0.5, 0.5,-0.5,-0.5, 0.5,0.5,-0.5, -0.5,0.5,-0.5
             ], dtype=np.float32)
-
+            
             obstacle_indices = np.array([
                 0,1,2, 0,2,3,  4,5,6, 4,6,7,
                 0,1,5, 0,5,4, 1,2,6, 1,6,5,
                 2,3,7, 2,7,6, 3,0,4, 3,4,7
             ], dtype=np.uint32)
-
+            
             obstacle = GameObject(
                 obstacle_vertices,
                 obstacle_indices,
                 [self.lane_positions[lane], 0, z_pos],
                 [0.9, 0.2, 0.2]
             )
-
+        
         self.obstacles.append(obstacle)
-
     
     def key_callback(self, window, key, scancode, action, mods):
         if action == glfw.PRESS:
@@ -402,23 +598,19 @@ class NauticRunner:
                 self.jump_velocity = 0.15
             elif key == glfw.KEY_R and self.game_over:
                 self.reset_game()
-            
-            # Teclas de DEBUG para ajustar rotação do modelo em tempo real
-            elif key == glfw.KEY_Q:  # Q - Rotacionar -90° em Y
+            elif key == glfw.KEY_Q:
                 self.player.rotation[1] -= 90
                 print(f"Rotação: {self.player.rotation}")
-            elif key == glfw.KEY_E:  # E - Rotacionar +90° em Y
+            elif key == glfw.KEY_E:
                 self.player.rotation[1] += 90
                 print(f"Rotação: {self.player.rotation}")
-            elif key == glfw.KEY_Z:  # Z - Resetar rotação
+            elif key == glfw.KEY_Z:
                 self.player.rotation = [0, 0, 0]
                 print(f"Rotação resetada: {self.player.rotation}")
-            
-            # Teclas de DEBUG para ajustar escala
-            elif key == glfw.KEY_EQUAL:  # + Aumentar escala
+            elif key == glfw.KEY_EQUAL:
                 self.player.scale = [s * 1.2 for s in self.player.scale]
                 print(f"Escala: {self.player.scale[0]:.4f}")
-            elif key == glfw.KEY_MINUS:  # - Diminuir escala
+            elif key == glfw.KEY_MINUS:
                 self.player.scale = [s / 1.2 for s in self.player.scale]
                 print(f"Escala: {self.player.scale[0]:.4f}")
     
@@ -436,12 +628,12 @@ class NauticRunner:
     def update(self, dt):
         if self.game_over:
             return
-        
-        # Atualizar posição do jogador
+
+        # mover jogador entre pistas
         target_x = self.lane_positions[self.player_lane]
         self.player.position[0] += (target_x - self.player.position[0]) * 0.20
-        
-        # Pulo
+
+        # pulo
         if self.jumping:
             self.player_y += self.jump_velocity
             self.jump_velocity -= 0.01
@@ -449,32 +641,36 @@ class NauticRunner:
                 self.player_y = 0
                 self.jumping = False
                 self.jump_velocity = 0
-        
+
         self.player.position[1] = self.player_y
-        
-        # Mover obstáculos
+
+        PLAYER_SIZE = np.array([0.8, 0.6, 1.2])
+        OBSTACLE_SIZE = np.array([0.8, 0.6, 1.2])
+
+        # obstáculos
         for obs in self.obstacles:
-            obs.position[2] -= self.game_speed
+            obs.position[2] += self.game_speed
 
-            distance = obs.position[2]
-            scale = max(0.5, min(1.5, 1.5 - distance * 0.01))
-            obs.scale = [scale, scale, scale]
-
-            # Verificar colisão
-            if not self.jumping and abs(obs.position[2]) < 1.5:
-                if abs(self.player.position[0] - obs.position[0]) < 0.8:
+            if not self.jumping:
+                if aabb_collision(
+                    self.player.position, PLAYER_SIZE,
+                    obs.position, OBSTACLE_SIZE
+                ):
                     self.game_over = True
                     print(f"Game Over! Score: {self.score}")
-        
-        # Remover obstáculos que passaram e adicionar novos
-        self.obstacles = [obs for obs in self.obstacles if obs.position[2] > -10]
-        
+                    return
+
+        # remover obstáculos fora da tela
+        self.obstacles = [obs for obs in self.obstacles if obs.position[2] < 10]
+
         if len(self.obstacles) < 3:
             self.spawn_obstacle()
-        
-        # Aumentar dificuldade
+
         self.game_speed += 0.00005
         self.score += 1
+
+        # print("Scala = ", obs.scale)
+
     
     def render(self):
         glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT)
@@ -483,11 +679,13 @@ class NauticRunner:
         proj_loc = glGetUniformLocation(self.shader, "projection")
         view_loc = glGetUniformLocation(self.shader, "view")
         model_loc = glGetUniformLocation(self.shader, "model")
+        use_texture_loc = glGetUniformLocation(self.shader, "useTexture")
         
         glUniformMatrix4fv(proj_loc, 1, GL_FALSE, self.projection)
         glUniformMatrix4fv(view_loc, 1, GL_FALSE, self.view)
         
         # Desenhar água
+        glUniform1i(use_texture_loc, 0)
         model = self.water.get_model_matrix()
         glUniformMatrix4fv(model_loc, 1, GL_FALSE, model)
         self.water.draw()
@@ -495,13 +693,55 @@ class NauticRunner:
         # Desenhar jogador
         model = self.player.get_model_matrix()
         glUniformMatrix4fv(model_loc, 1, GL_FALSE, model)
-        self.player.draw()
+        
+        # Se o player tem materiais (modelo com texturas)
+        if hasattr(self.player, 'materials'):
+            for material in self.player.materials:
+                if material['texture_idx'] is not None and material['texture_idx'] < len(self.player.textures):
+                    glUniform1i(use_texture_loc, 1)
+                    glBindTexture(GL_TEXTURE_2D, self.player.textures[material['texture_idx']])
+                else:
+                    glUniform1i(use_texture_loc, 0)
+                
+                glBindVertexArray(material['VAO'])
+                glDrawElements(GL_TRIANGLES, material['indices_count'], GL_UNSIGNED_INT, None)
+        else:
+            # Modelo simples sem materiais
+            glUniform1i(use_texture_loc, 0)
+            self.player.draw()
         
         # Desenhar obstáculos
         for obs in self.obstacles:
-            model = obs.get_model_matrix()
-            glUniformMatrix4fv(model_loc, 1, GL_FALSE, model)
-            obs.draw()
+            self.draw_hitbox(
+                obs.position,
+                OBSTACLE_SIZE,
+                obs.scale
+            )
+
+            
+            # Se o obstáculo tem materiais
+            if hasattr(obs, 'materials'):
+                for material in obs.materials:
+                    if material['texture_idx'] is not None and material['texture_idx'] < len(obs.textures):
+                        glUniform1i(use_texture_loc, 1)
+                        glBindTexture(GL_TEXTURE_2D, obs.textures[material['texture_idx']])
+                    else:
+                        glUniform1i(use_texture_loc, 0)
+                    
+                    glBindVertexArray(material['VAO'])
+                    glDrawElements(GL_TRIANGLES, material['indices_count'], GL_UNSIGNED_INT, None)
+            else:
+                # Obstáculo simples
+                glUniform1i(use_texture_loc, 0)
+                obs.draw()
+                
+        self.draw_hitbox(
+        self.player.position,
+        PLAYER_SIZE,
+        self.player.scale
+)
+
+                                                                    
     
     def run(self):
         last_time = glfw.get_time()
@@ -512,9 +752,9 @@ class NauticRunner:
         print("  ESPAÇO - Pular")
         print("  R - Reiniciar (após game over)")
         print("\nTeclas de DEBUG:")
-        print("  Q/E - Rotacionar modelo (testar orientação)")
+        print("  Q/E - Rotacionar modelo")
         print("  Z - Resetar rotação")
-        print("  +/- - Ajustar escala do modelo")
+        print("  +/- - Ajustar escala")
         print("\nDesvie dos obstáculos!")
         
         while not glfw.window_should_close(self.window):
@@ -528,7 +768,7 @@ class NauticRunner:
             glfw.swap_buffers(self.window)
             
             glfw.set_window_title(self.window, 
-                f"Nautic Runner - Score: {self.score} {'[GAME OVER - Press R]' if self.game_over else ''}")
+                f"Nautic Runner - BACKUP - Score: {self.score} {'[GAME OVER - Press R]' if self.game_over else ''}")
         
         glfw.terminate()
 
