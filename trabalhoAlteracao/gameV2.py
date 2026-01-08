@@ -354,6 +354,42 @@ def aabb_collision(posA, sizeA, posB, sizeB):
         minA[2] <= maxB[2] and maxA[2] >= minB[2]
     )
 
+# DEBUG COLISAO
+def create_hitbox_vao():
+    # Cubo unitário centrado na origem
+    vertices = np.array([
+        -0.5, -0.5, -0.5,
+         0.5, -0.5, -0.5,
+         0.5,  0.5, -0.5,
+        -0.5,  0.5, -0.5,
+        -0.5, -0.5,  0.5,
+         0.5, -0.5,  0.5,
+         0.5,  0.5,  0.5,
+        -0.5,  0.5,  0.5,
+    ], dtype=np.float32)
+
+    indices = np.array([
+        0,1, 1,2, 2,3, 3,0,
+        4,5, 5,6, 6,7, 7,4,
+        0,4, 1,5, 2,6, 3,7
+    ], dtype=np.uint32)
+
+    VAO = glGenVertexArrays(1)
+    VBO = glGenBuffers(1)
+    EBO = glGenBuffers(1)
+
+    glBindVertexArray(VAO)
+
+    glBindBuffer(GL_ARRAY_BUFFER, VBO)
+    glBufferData(GL_ARRAY_BUFFER, vertices.nbytes, vertices, GL_STATIC_DRAW)
+
+    glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, EBO)
+    glBufferData(GL_ELEMENT_ARRAY_BUFFER, indices.nbytes, indices, GL_STATIC_DRAW)
+
+    glEnableVertexAttribArray(0)
+    glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 12, ctypes.c_void_p(0))
+
+    return VAO, len(indices)
 
 
 class NauticRunner:
@@ -391,7 +427,7 @@ class NauticRunner:
         self.using_custom_model = False
         
         # Configuração das pistas
-        self.lane_positions = [-2.0, 0.0, 2.0]
+        self.lane_positions = [-1.0, 0.0, 1.0]
         
         self.setup_game_objects()
         
@@ -406,6 +442,37 @@ class NauticRunner:
             pyrr.Vector3([0, 0, 0]),
             pyrr.Vector3([0, 1, 0])
         )
+
+        self.hitbox_vao, self.hitbox_index_count = create_hitbox_vao()
+        self.show_hitboxes = True
+
+    def draw_hitbox(self, position, size, scale):
+        model = pyrr.matrix44.create_identity()
+
+        model = pyrr.matrix44.multiply(
+            model,
+            pyrr.matrix44.create_from_translation(position)
+        )
+
+        # tamanho da hitbox * escala do objeto
+        final_scale = np.array(size) * np.array(scale)
+
+        model = pyrr.matrix44.multiply(
+            model,
+            pyrr.matrix44.create_from_scale(final_scale)
+        )
+
+        model_loc = glGetUniformLocation(self.shader, "model")
+        use_texture_loc = glGetUniformLocation(self.shader, "useTexture")
+
+        glUniform1i(use_texture_loc, 0)
+        glUniformMatrix4fv(model_loc, 1, GL_FALSE, model)
+
+        glBindVertexArray(self.hitbox_vao)
+        glDrawElements(GL_LINES, self.hitbox_index_count, GL_UNSIGNED_INT, None)
+    
+
+
     
     def setup_game_objects(self):
         try:
@@ -425,7 +492,7 @@ class NauticRunner:
             self.player = ModelObject(model_path, 
                                      [self.lane_positions[1], 0, 0], 
                                      color=[1.0, 1.0, 1.0],
-                                     scale=1.3,
+                                     scale=2.3,
                                      texture_paths=texture_paths)
             
             self.player.rotation = [0, 0, 0]
@@ -467,7 +534,7 @@ class NauticRunner:
     
     def spawn_obstacle(self):
         lane = random.randint(0, 2)
-        z_pos = 80 + random.randint(0, 30)
+        z_pos = -80 - random.randint(0, 30)
         
         try:
             enemy_model_path = "Boat/boat.obj"
@@ -491,7 +558,7 @@ class NauticRunner:
                 enemy_model_path,
                 [self.lane_positions[lane], 0, z_pos],
                 color=random.choice(colors),
-                scale=1.2,
+                scale=2.3,
                 texture_paths=enemy_texture_paths
             )
             
@@ -582,11 +649,7 @@ class NauticRunner:
 
         # obstáculos
         for obs in self.obstacles:
-            obs.position[2] -= self.game_speed
-
-            distance = obs.position[2]
-            scale = max(0.5, min(1.5, 1.5 - distance * 0.01))
-            obs.scale = [scale, scale, scale]
+            obs.position[2] += self.game_speed
 
             if not self.jumping:
                 if aabb_collision(
@@ -598,13 +661,15 @@ class NauticRunner:
                     return
 
         # remover obstáculos fora da tela
-        self.obstacles = [obs for obs in self.obstacles if obs.position[2] > -10]
+        self.obstacles = [obs for obs in self.obstacles if obs.position[2] < 10]
 
         if len(self.obstacles) < 3:
             self.spawn_obstacle()
 
         self.game_speed += 0.00005
         self.score += 1
+
+        # print("Scala = ", obs.scale)
 
     
     def render(self):
@@ -647,8 +712,12 @@ class NauticRunner:
         
         # Desenhar obstáculos
         for obs in self.obstacles:
-            model = obs.get_model_matrix()
-            glUniformMatrix4fv(model_loc, 1, GL_FALSE, model)
+            self.draw_hitbox(
+                obs.position,
+                OBSTACLE_SIZE,
+                obs.scale
+            )
+
             
             # Se o obstáculo tem materiais
             if hasattr(obs, 'materials'):
@@ -665,6 +734,14 @@ class NauticRunner:
                 # Obstáculo simples
                 glUniform1i(use_texture_loc, 0)
                 obs.draw()
+                
+        self.draw_hitbox(
+        self.player.position,
+        PLAYER_SIZE,
+        self.player.scale
+)
+
+                                                                    
     
     def run(self):
         last_time = glfw.get_time()
