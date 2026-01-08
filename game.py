@@ -1,595 +1,537 @@
 import glfw
-import OpenGL.GL as gl
+from OpenGL.GL import *
+from OpenGL.GL.shaders import compileProgram, compileShader
 import numpy as np
-import math
+import pyrr
+from math import sin, cos, radians
 import random
-import ctypes
-import sys
-import os
-from typing import Dict, Any, List, Tuple
 
-# carregar o texto do arquivo do shader
-def load_shader(path):
-    try:
-        with open(path, "r") as f:
-            return f.read()
-    except FileNotFoundError:
-        raise RuntimeError(f"Shader file not found: {path}. Please ensure vertex.glsl and fragment.glsl are in the same directory.")
+# Vertex Shader
+vertex_src = """
+# version 330 core
 
+layout(location = 0) in vec3 a_position;
+layout(location = 1) in vec3 a_color;
 
-def check_shader_compile_status(shader_id: int, shader_type_name: str):
-    """Verifica o status de compilação e lança exceção com log de erro se falhar."""
-    if gl.glGetShaderiv(shader_id, gl.GL_COMPILE_STATUS) != gl.GL_TRUE:
-        log = gl.glGetShaderInfoLog(shader_id).decode()
+uniform mat4 model;
+uniform mat4 view;
+uniform mat4 projection;
+
+out vec3 v_color;
+
+void main()
+{
+    gl_Position = projection * view * model * vec4(a_position, 1.0);
+    v_color = a_color;
+}
+"""
+
+# Fragment Shader
+fragment_src = """
+# version 330 core
+
+in vec3 v_color;
+out vec4 FragColor;
+
+void main()
+{
+    FragColor = vec4(v_color, 1.0);
+}
+"""
+
+class GameObject:
+    def __init__(self, vertices, indices, position, color):
+        self.position = np.array(position, dtype=np.float32)
+        self.vertices = vertices
+        self.indices = indices
+        self.color = color
+        self.rotation = [0, 0, 0]  # rotação em x, y, z
+        self.scale = [1, 1, 1]  # escala em x, y, z
+        self.setup_mesh()
+    
+    def setup_mesh(self):
+        colored_vertices = []
+        for i in range(0, len(self.vertices), 3):
+            colored_vertices.extend([self.vertices[i], self.vertices[i+1], self.vertices[i+2]])
+            colored_vertices.extend(self.color)
         
-        gl.glDeleteShader(shader_id) 
-        raise RuntimeError(f"{shader_type_name} Shader Compilation Error:\n{log}")
-
-def check_program_link_status(program_id: int):
-    if gl.glGetProgramiv(program_id, gl.GL_LINK_STATUS) != gl.GL_TRUE:
-        log = gl.glGetProgramInfoLog(program_id).decode()
-        gl.glDeleteProgram(program_id)
-        raise RuntimeError(f"Shader Program Linkage Error:\n{log}")
-    
-def compile_single_shader(source: str, gl_type: int, type_name: str) -> int:
-    shader_id = gl.glCreateShader(gl_type)
-    gl.glShaderSource(shader_id, source)
-    gl.glCompileShader(shader_id)
-    
-    check_shader_compile_status(shader_id, type_name)
-    
-    return shader_id
-
-
-def create_shader_program(vs_path: str, fs_path: str) -> int:
-    """
-    Carrega, compila, linka e retorna o ID de um novo programa shader.
-    A função é responsável pela gestão de erros críticos.
-    """
-    # Carregamento de Código (Fluxo de Erro Mantido)
-    try:
-        # Usando o nome refatorado se aplicável: vs_src = load_shader_source(vs_path)
-        vs_src = load_shader(vs_path)
-        fs_src = load_shader(fs_path)
-    except RuntimeError as e:
-        print(f"Erro de carregamento de Shader: {e}")
-        # Fluxo de saída do programa, mantido do código original
-        # import glfw, sys
-        glfw.terminate() 
-        sys.exit(1)
-
-    # Compilação (Usa a função auxiliar)
-    vs_id = compile_single_shader(vs_src, gl.GL_VERTEX_SHADER, "Vertex")
-    fs_id = compile_single_shader(fs_src, gl.GL_FRAGMENT_SHADER, "Fragment")
-
-    # Linkagem
-    program_id = gl.glCreateProgram()
-    gl.glAttachShader(program_id, vs_id)
-    gl.glAttachShader(program_id, fs_id)
-    gl.glLinkProgram(program_id)
-
-    # Verificação de Linkagem (Usa a função auxiliar)
-    check_program_link_status(program_id)
-
-    # Limpeza de Recursos
-    gl.glDeleteShader(vs_id)
-    gl.glDeleteShader(fs_id)
-
-    return program_id
-
-
-def _parse_obj_data(path: str) -> tuple[list[list[float]], list[list[int]]]:
-    
-    raw_verts = []
-    raw_faces = []
-
-    print(f"Carregando {path}...")
-    with open(path, "r", errors="ignore") as f:
-        for line in f:
-            if line.startswith("v "):
-                try:
-                    _, x, y, z = line.split()[:4]
-                    raw_verts.append([float(x), float(y), float(z)])
-                except ValueError:
-                    continue
-
-            elif line.startswith("f "):
-                parts = line.split()[1:]
-                idxs = []
-                
-                for p in parts:
-                    try:
-                        # Extrai o primeiro índice (índice do vértice 'v')
-                        v_idx = p.split("/")[0]
-                        # OBJ usa 1-based indexing, então subtraímos 1
-                        idxs.append(int(v_idx) - 1)
-                    except (ValueError, IndexError):
-                        continue
-
-                if len(idxs) >= 3:
-                    for i in range(1, len(idxs) - 1):
-                        raw_faces.append([idxs[0], idxs[i], idxs[i+1]])
-
-    if len(raw_verts) == 0:
-        raise RuntimeError(f"OBJ sem vértices úteis (v ).")
-    if len(raw_faces) == 0:
-        raise RuntimeError(f"OBJ sem faces úteis (f ).")
-
-    return raw_verts, raw_faces
-
-def load_obj_simple(path: str, target_size: float = 2.0) -> tuple[np.ndarray, np.ndarray]:
-    """
-    Carrega um arquivo OBJ, centraliza e escala a geometria.
-    Retorna um array de vértices e um array 1D de índices.
-    """
-    if not os.path.exists(path):
-        raise FileNotFoundError(f"OBJ file not found: {path}")
-
-    verts_list, faces_list = _parse_obj_data(path)
-
-    vertices = np.array(verts_list, dtype=np.float32)
-    indices = np.array(faces_list, dtype=np.uint32).ravel()
-    
-    
-    vmin = vertices.min(axis=0)
-    vmax = vertices.max(axis=0)
-    
-    center = (vmin + vmax) / 2.0
-    vertices -= center 
-
-    extents = vmax - vmin
-    max_extent = np.max(extents) 
-    
-    if max_extent > 0:
-        scale = target_size / max_extent
-        vertices *= scale
-    else:
-        scale = 1.0
-
-    
-    num_tris = len(indices) // 3
-    print(f"[load_obj_simple] {path}: verts={len(vertices)}, tris={num_tris}")
-    print(f"[DEBUG] bbox min/max (após escala) = {vertices.min(axis=0)}, {vertices.max(axis=0)}")
-    print(f"[DEBUG] scale usado: {scale}")
-
-    return vertices, indices
-
-
-def create_perspective_matrix(fov_rad: float, aspect: float, near: float, far: float) -> np.ndarray:
-  
-    if near == far or near <= 0 or far <= 0 or fov_rad <= 0:
-        raise ValueError("Parâmetros de projeção inválidos. 'near', 'far', e 'fov' devem ser positivos, e 'near' != 'far'.")
-
-    tan_half_fov = math.tan(fov_rad / 2.0)
-    if tan_half_fov == 0:
-        raise ValueError("FOV inválido, tan(fov/2) é zero.")
+        self.VAO = glGenVertexArrays(1)
+        VBO = glGenBuffers(1)
+        EBO = glGenBuffers(1)
         
-    f = 1.0 / tan_half_fov
-    
-    range_inv = 1.0 / (near - far)
-    
-    A = f / aspect
-    B = f
-    
-    
-    C = (far + near) * range_inv
-    D = (2.0 * far * near) * range_inv 
-
-    mat = np.array([
-        [A, 0.0, 0.0, 0.0],
-        [0.0, B, 0.0, 0.0],
-        [0.0, 0.0, C, D],
-        [0.0, 0.0, -1.0, 0.0], 
-    ], dtype=np.float32)
-    
-    return mat
-
-
-def _normalize_vector(v: np.ndarray) -> np.ndarray:
-    norm = np.linalg.norm(v)
-    if norm == 0.0:
-        raise ValueError("Vetor nulo não pode ser normalizado na função look_at.")
-    return v / norm
-
-def create_view_matrix(eye: np.ndarray, center: np.ndarray, up: np.ndarray) -> np.ndarray:
-    
-    f = center - eye
-    f = _normalize_vector(f) 
-    
-    
-    u_norm = _normalize_vector(up) 
-    
-    s = np.cross(f, u_norm)
-    s = _normalize_vector(s) 
-    
-    
-    u = np.cross(s, f) 
-    
-    
-    M = np.identity(4, dtype=np.float32)
-
-    
-    M[0, :3] = s  
-    M[1, :3] = u  
-    M[2, :3] = -f 
-
-
-    M[:3, 3] = -np.dot(M[:3, :3], eye)
-
-    return M
-
-
-cube_vertices = np.array([
-    -0.5, -0.5,  0.5,  
-     0.5, -0.5,  0.5,  
-     0.5,  0.5,  0.5,  
-    -0.5,  0.5,  0.5,  
-    
-    -0.5, -0.5, -0.5,  
-     0.5, -0.5, -0.5,  
-     0.5,  0.5, -0.5,  
-    -0.5,  0.5, -0.5,  
-], dtype=np.float32)
-
-cube_indices = np.array([
-    0, 1, 2,    
-    2, 3, 0,    
-    
-    1, 5, 6,    
-    6, 2, 1,    
-    
-    5, 4, 7,    
-    7, 6, 5,    
-    
-    4, 0, 3,    
-    3, 7, 4,    
-    
-    3, 2, 6,    
-    6, 7, 3,    
-    
-    4, 5, 1,    
-    1, 0, 4     
-], dtype=np.uint32)
-
-
-TRACK_Y_LEVEL = -3.0 
-
-
-track_vertices = np.array([
-    # X     Y           Z
-    -3.0, TRACK_Y_LEVEL,   5.0,  
-     3.0, TRACK_Y_LEVEL,   5.0,  
-     3.0, TRACK_Y_LEVEL, -200.0, 
-    -3.0, TRACK_Y_LEVEL, -200.0, 
-], dtype=np.float32)
-
-track_indices = np.array([
-    0, 1, 2,  
-    2, 3, 0   
-], dtype=np.uint32)
-
-import numpy as np
-
-
-def create_ground_plane(width: float, depth: float, y_level: float) -> tuple[np.ndarray, np.ndarray]:
-    
-    half_w = width / 2.0
-    half_d = depth / 2.0
-
-    vertices = np.array([
-  
-        -half_w, y_level,  half_d,  
-         half_w, y_level,  half_d, 
-         half_w, y_level, -half_d,  
-        -half_w, y_level, -half_d, 
-    ], dtype=np.float32)
-
-    indices = np.array([
-        0, 1, 2,  # T1
-        2, 3, 0   # T2
-    ], dtype=np.uint32)
-    
-    return vertices, indices
-
-
-
-def create_custom_plane(x_min, x_max, z_min, z_max, y_level) -> tuple[np.ndarray, np.ndarray]:
-    vertices = np.array([
-        [x_min, y_level, z_max],   
-        [x_max, y_level, z_max],   
-        [x_max, y_level, z_min],  
-        [x_min, y_level, z_min],   
-    ], dtype=np.float32).flatten() 
-
-    indices = np.array([0, 1, 2, 2, 3, 0], dtype=np.uint32)
-    return vertices, indices
-
-
-LANE_POSITIONS = [-2.0, 0.0, 2.0] 
-
-def initialize_game_state() -> Dict[str, Any]:
- 
-    INITIAL_LANE_INDEX = 1 
-    
-    game_state = {
-        "lane_positions": LANE_POSITIONS,   
-        "current_lane_index": INITIAL_LANE_INDEX, 
+        glBindVertexArray(self.VAO)
         
-        "obstacles": [],                   
+        glBindBuffer(GL_ARRAY_BUFFER, VBO)
+        glBufferData(GL_ARRAY_BUFFER, np.array(colored_vertices, dtype=np.float32).nbytes,
+                     np.array(colored_vertices, dtype=np.float32), GL_STATIC_DRAW)
         
-        "spawn_timer": 0.0,                
-
-        "last_left_input": False,          
-        "last_right_input": False,         
+        glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, EBO)
+        glBufferData(GL_ELEMENT_ARRAY_BUFFER, self.indices.nbytes, self.indices, GL_STATIC_DRAW)
         
-    }
-    return game_state
-
-
-
-def create_model_matrix(x: float, y: float, z: float, scale: float, rotation_y: float = 0.0) -> np.ndarray:
-   
-    model = np.identity(4, dtype=np.float32)
-
-    
-    model[0, 0] *= scale
-    model[1, 1] *= scale
-    model[2, 2] *= scale
-
-    c = math.cos(rotation_y)
-    s = math.sin(rotation_y)
-    
-    R_y = np.array([
-        [ c, 0, s, 0],
-        [ 0, 1, 0, 0],
-        [-s, 0, c, 0],
-        [ 0, 0, 0, 1]
-    ], dtype=np.float32)
-
-    
-    model = np.dot(R_y, model) 
-
-   
-    model[0, 3] = x
-    model[1, 3] = y
-    model[2, 3] = z
-    
-    return model
-
-def render_mesh(shader_id: int, vao_id: int, index_count: int, 
-                model_matrix: np.ndarray, color: Tuple[float, float, float], 
-                view_matrix: np.ndarray, proj_matrix: np.ndarray):
-   
-    gl.glUseProgram(shader_id)
-
-   
-    gl.glUniformMatrix4fv(gl.glGetUniformLocation(shader_id, "model"), 
-                          1, gl.GL_FALSE, model_matrix.T)
-                          
-    gl.glUniformMatrix4fv(gl.glGetUniformLocation(shader_id, "view"), 
-                          1, gl.GL_FALSE, view_matrix.T)
-                          
-    gl.glUniformMatrix4fv(gl.glGetUniformLocation(shader_id, "projection"), 
-                          1, gl.GL_FALSE, proj_matrix.T)
-
-    gl.glUniform3f(gl.glGetUniformLocation(shader_id, "objColor"), *color)
-    
-    gl.glBindVertexArray(vao_id)
-    gl.glDrawElements(gl.GL_TRIANGLES, index_count, gl.GL_UNSIGNED_INT, None)
-    gl.glBindVertexArray(0) # Desvincula o VAO
-
-
-def setup_mesh_buffers(vertices: np.ndarray, indices: np.ndarray) -> tuple[int, int]:
-    
-
-    if indices.size == 0 or vertices.size == 0:
-        print(f"[ERROR] Mesh Buffer Setup Falhou: Vertices ou Índices vazios.")
-        return 0, 0 
-    
-    vao = gl.glGenVertexArrays(1)
-    gl.glBindVertexArray(vao)
-
-    vbo = gl.glGenBuffers(1)
-    gl.glBindBuffer(gl.GL_ARRAY_BUFFER, vbo)
-    gl.glBufferData(gl.GL_ARRAY_BUFFER, vertices.nbytes, vertices, gl.GL_STATIC_DRAW)
-
-    ebo = gl.glGenBuffers(1)
-    gl.glBindBuffer(gl.GL_ELEMENT_ARRAY_BUFFER, ebo)
-    gl.glBufferData(gl.GL_ELEMENT_ARRAY_BUFFER, indices.nbytes, indices, gl.GL_STATIC_DRAW)
-
-    gl.glEnableVertexAttribArray(0)
-    gl.glVertexAttribPointer(0, 3, gl.GL_FLOAT, gl.GL_FALSE, 12, None)
-
-    gl.glBindVertexArray(0)
-    return vao, len(indices)
-
-def handle_input(win: glfw._GLFWwindow, game_state: Dict[str, Any]):
-    
-    current_lane = game_state["current_lane_index"]
-    last_left = game_state["last_left_input"]
-    last_right = game_state["last_right_input"]
-    
-    left = glfw.get_key(win, glfw.KEY_LEFT) == glfw.PRESS or \
-           glfw.get_key(win, glfw.KEY_A) == glfw.PRESS
-    right = glfw.get_key(win, glfw.KEY_RIGHT) == glfw.PRESS or \
-            glfw.get_key(win, glfw.KEY_D) == glfw.PRESS
-
-    if left and not last_left:  
-        current_lane = max(0, current_lane - 1)
-    if right and not last_right:
-        current_lane = min(2, current_lane + 1)
-    
-    game_state["current_lane_index"] = current_lane
-    game_state["last_left_input"] = left
-    game_state["last_right_input"] = right
-
-def update_game(win: glfw._GLFWwindow, game_state: Dict[str, Any], delta_time: float = 1.0):
-    """
-    Atualiza o estado de obstáculos, spawns e verifica colisões.
-    (delta_time adicionado para potencial future frame-rate independence)
-    """
-    
-    # 1. Spawn de Obstáculos
-    game_state["spawn_timer"] += delta_time
-    if game_state["spawn_timer"] > 30: # 30 "ticks" (dependente do framerate atual)
-        game_state["spawn_timer"] = 0.0
-        # Obstáculo: [índice da pista, nível Y, posição Z]
-        game_state["obstacles"].append([random.choice([0,1,2]), -3.0, -40.0]) # Usando -3.0 como altura base
-    
-    # 2. Movimentação e Colisão
-    new_obs = []
-    player_lane = game_state["current_lane_index"]
-    
-    for lane, oy, oz in game_state["obstacles"]:
-        oz += 0.3 * delta_time # Velocidade
+        glEnableVertexAttribArray(0)
+        glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 24, ctypes.c_void_p(0))
         
-        # Colisão
-        if abs(oz) < 0.9 and lane == player_lane:
-            print("COLISÃO! Fim de jogo.")
-            glfw.set_window_should_close(win, True)
-            
-        # Manter obstáculo se estiver na tela
-        if oz < 20: 
-            new_obs.append([lane, oy, oz])
-
-    game_state["obstacles"] = new_obs
-
-def main():
-    # Inicializa o estado do jogo (substitui as globais soltas)
-    # Assumindo que initialize_game_state() foi refatorada
-    game_state = initialize_game_state() 
-    lanes = game_state["lane_positions"] # Atalho para as posições X
+        glEnableVertexAttribArray(1)
+        glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, 24, ctypes.c_void_p(12))
     
-    if not glfw.init():
-        raise RuntimeError("glfw.init failed")
-
-    win = None
-    try:
+    def get_model_matrix(self):
+        # Criar matriz de transformação
+        model = pyrr.matrix44.create_identity()
         
-        win = glfw.create_window(900, 600, "Boat as Player", None, None)
-        if not win:
-            raise RuntimeError("Failed to create GLFW window")
+        # Translação
+        model = pyrr.matrix44.multiply(model, 
+            pyrr.matrix44.create_from_translation(self.position))
         
-        glfw.make_context_current(win)
-        gl.glEnable(gl.GL_DEPTH_TEST)
-        shader = create_shader_program("vertex.glsl","fragment.glsl")
-
-        # -----------------------
-        # 2. CONFIGURAÇÃO DE MESHS
-        # -----------------------
+        # Rotação (Y -> X -> Z)
+        if self.rotation[1] != 0:
+            model = pyrr.matrix44.multiply(model,
+                pyrr.matrix44.create_from_y_rotation(radians(self.rotation[1])))
+        if self.rotation[0] != 0:
+            model = pyrr.matrix44.multiply(model,
+                pyrr.matrix44.create_from_x_rotation(radians(self.rotation[0])))
+        if self.rotation[2] != 0:
+            model = pyrr.matrix44.multiply(model,
+                pyrr.matrix44.create_from_z_rotation(radians(self.rotation[2])))
         
-        # Pista
-        track_vao, track_index_count = setup_mesh_buffers(track_vertices, track_indices)
+        # Escala
+        model = pyrr.matrix44.multiply(model,
+            pyrr.matrix44.create_from_scale(self.scale))
+        
+        return model
+    
+    def draw(self):
+        glBindVertexArray(self.VAO)
+        glDrawElements(GL_TRIANGLES, len(self.indices), GL_UNSIGNED_INT, None)
 
-        # Cubo (Obstáculos e Substituto do Jogador)
-        cube_vao, cube_index_count = setup_mesh_buffers(cube_vertices, cube_indices)
-
-        # Jogador (OBJ)
-        model_vao, model_index_count = 0, 0 # Inicializar com 0
+class ModelObject:
+    """Classe para carregar modelos .obj manualmente"""
+    def __init__(self, obj_path, position, color=[0.7, 0.7, 0.7], scale=1.0):
+        self.position = np.array(position, dtype=np.float32)
+        self.rotation = [0, 0, 0]
+        self.scale = [scale, scale, scale]
+        self.color = color
+        
+        # Carregar modelo .obj manualmente
+        vertices, indices = self.load_obj(obj_path)
+        self.vertices = vertices
+        self.indices = indices
+        self.setup_mesh()
+    
+    def load_obj(self, filename):
+        """Carrega arquivo .obj manualmente"""
+        vertices = []
+        faces = []
+        
+        print(f"Carregando modelo: {filename}")
+        
         try:
-            model_vertices, model_indices = load_obj_simple("Medieval Boat.obj", target_size=100.0)
-            model_vao, model_index_count = setup_mesh_buffers(model_vertices, model_indices)
+            with open(filename, 'r') as file:
+                for line in file:
+                    line = line.strip()
+                    
+                    if not line or line.startswith('#'):
+                        continue
+                    
+                    parts = line.split()
+                    
+                    # Vértices (v x y z)
+                    if parts[0] == 'v':
+                        x, y, z = float(parts[1]), float(parts[2]), float(parts[3])
+                        vertices.append([x, y, z])
+                    
+                    # Faces (f v1 v2 v3 ou f v1/vt1/vn1 v2/vt2/vn2 v3/vt3/vn3)
+                    elif parts[0] == 'f':
+                        face = []
+                        for i in range(1, len(parts)):
+                            # Pegar apenas o índice do vértice (ignora textura e normal)
+                            vertex_index = parts[i].split('/')[0]
+                            face.append(int(vertex_index) - 1)  # OBJ usa índice 1-based
+                        
+                        # Triangular faces com mais de 3 vértices
+                        for i in range(1, len(face) - 1):
+                            faces.append([face[0], face[i], face[i + 1]])
             
-            # --- NOVO DEBUG: FORÇAR CONTAGEM SE O VAO FOR CRIADO ---
-            if model_vao != 0 and model_index_count == 0:
-                # Se o VAO foi criado (ID > 0), mas a contagem é 0, force a contagem para 1.
-                # Isso garante que a lógica 'if model_index_count > 0' seja TRUE.
-                model_index_count = 1 
-           
-
-            print("[main] Modelo OBJ carregado com sucesso.")
-        except Exception as e:
-            print(f"ERRO ao carregar OBJ: {e}. Usando cubo substituto.")
-
-        # -----------------------
-        # 3. GAME LOOP
-        # -----------------------
-        while not glfw.window_should_close(win):
-            # 3.1. Pré-Desenho
-            gl.glClearColor(0,0,0,1)
-            gl.glClear(gl.GL_COLOR_BUFFER_BIT | gl.GL_DEPTH_BUFFER_BIT)
+            print(f"✓ Carregados {len(vertices)} vértices e {len(faces)} faces")
             
-            # Câmera
-            view = create_view_matrix(
-                np.array([0,2,7],np.float32), np.array([0,0,0],np.float32), np.array([0,1,0],np.float32)
-            )
-            width, height = glfw.get_framebuffer_size(win)
-            proj = create_perspective_matrix(math.radians(60), width/height, 0.1, 200)
+            # Calcular centro e tamanho do modelo para normalização
+            if vertices:
+                vertices_np = np.array(vertices)
+                min_coords = vertices_np.min(axis=0)
+                max_coords = vertices_np.max(axis=0)
+                center = (min_coords + max_coords) / 2
+                size = max_coords - min_coords
+                max_size = max(size)
+                
+                print(f"  Centro: {center}")
+                print(f"  Tamanho: {size}")
+                print(f"  Maior dimensão: {max_size}")
+                
+                # Centralizar modelo
+                # Centralizar e NORMALIZAR modelo
+                
+                for i in range(len(vertices)):
+                    vertices[i][0] = (vertices[i][0] - center[0]) / max_size
+                    vertices[i][1] = (vertices[i][1] - center[1]) / max_size
+                    vertices[i][2] = (vertices[i][2] - center[2]) / max_size
 
-            # 3.2. Lógica do Jogo
-            handle_input(win, game_state)
-            update_game(win, game_state)
             
-            # Posições atualizadas
-            player_x = lanes[game_state["current_lane_index"]]
-            player_y = TRACK_Y_LEVEL + 0.5
+            # Converter para arrays numpy
+            vertices_array = []
+            indices_array = []
             
-            # 3.3. DESENHO
+            for face in faces:
+                for vertex_idx in face:
+                    if vertex_idx < len(vertices):
+                        vertices_array.extend(vertices[vertex_idx])
+                        vertices_array.extend(self.color)
+                        indices_array.append(len(indices_array))
             
-            # Desenha Pista
-            track_model_mat = create_model_matrix(0, 0, 0, 1) # Argumento 4: Matriz Model
-            render_mesh(
-                shader_id=shader, 
-                vao_id=track_vao, 
-                index_count=track_index_count, 
-                model_matrix=track_model_mat,           # <--- Matriz Model
-                color=(0.1, 0.2, 1), 
-                view_matrix=view, 
-                proj_matrix=proj
-            )
-
-            # Desenha Jogador (Barco ou Cubo Substituto)
-            if model_index_count > 0:
-                vao_to_draw, count_to_draw, color = model_vao, model_index_count, (1,0.2,0.2)
-            else:
-                vao_to_draw, count_to_draw, color = cube_vao, cube_index_count, (1, 0.0, 0.0)
-
-            player_model_mat = create_model_matrix(
-                x=player_x, 
-                y=player_y, 
-                z=0.0, 
-                scale=1.0, 
-                rotation_y=math.radians(180.0)
-            )
-            render_mesh(
-                shader_id=shader, 
-                vao_id=vao_to_draw, 
-                index_count=count_to_draw, 
-                model_matrix=player_model_mat,         
-                color=color, 
-                view_matrix=view, 
-                proj_matrix=proj
-            ) 
-
-            # Desenha Obstáculos
-            for lane_idx, oy, oz in game_state["obstacles"]:
-                obs_model_mat = create_model_matrix(
-                    x=lanes[lane_idx], 
-                    y=oy + 1.0, 
-                    z=oz, 
-                    scale=1.0,
-                    rotation_y=0.0 # Sem rotação
-                )
-                render_mesh(
-                    shader_id=shader, 
-                    vao_id=cube_vao, 
-                    index_count=cube_index_count, 
-                    model_matrix=obs_model_mat,          
-                    color=(0, 0.9, 0.2), 
-                    view_matrix=view, 
-                    proj_matrix=proj
-                )
-
-            glfw.swap_buffers(win)
-            glfw.poll_events()
-
-    except Exception as e:
-        print(f"Ocorreu um erro fatal: {e}")
+            return (np.array(vertices_array, dtype=np.float32),
+                    np.array(indices_array, dtype=np.uint32))
         
-    finally:
-        if win:
-            glfw.destroy_window(win)
+        except FileNotFoundError:
+            print(f"✗ Arquivo não encontrado: {filename}")
+            raise
+        except Exception as e:
+            print(f"✗ Erro ao carregar modelo: {e}")
+            raise
+    
+    def setup_mesh(self):
+        self.VAO = glGenVertexArrays(1)
+        VBO = glGenBuffers(1)
+        EBO = glGenBuffers(1)
+        
+        glBindVertexArray(self.VAO)
+        
+        glBindBuffer(GL_ARRAY_BUFFER, VBO)
+        glBufferData(GL_ARRAY_BUFFER, self.vertices.nbytes, self.vertices, GL_STATIC_DRAW)
+        
+        glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, EBO)
+        glBufferData(GL_ELEMENT_ARRAY_BUFFER, self.indices.nbytes, self.indices, GL_STATIC_DRAW)
+        
+        # Posição (x, y, z)
+        glEnableVertexAttribArray(0)
+        glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 24, ctypes.c_void_p(0))
+        
+        # Cor (r, g, b)
+        glEnableVertexAttribArray(1)
+        glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, 24, ctypes.c_void_p(12))
+    
+    def get_model_matrix(self):
+        model = pyrr.matrix44.create_identity()
+        
+        model = pyrr.matrix44.multiply(model, 
+            pyrr.matrix44.create_from_translation(self.position))
+        
+        if self.rotation[1] != 0:
+            model = pyrr.matrix44.multiply(model,
+                pyrr.matrix44.create_from_y_rotation(radians(self.rotation[1])))
+        if self.rotation[0] != 0:
+            model = pyrr.matrix44.multiply(model,
+                pyrr.matrix44.create_from_x_rotation(radians(self.rotation[0])))
+        if self.rotation[2] != 0:
+            model = pyrr.matrix44.multiply(model,
+                pyrr.matrix44.create_from_z_rotation(radians(self.rotation[2])))
+        
+        model = pyrr.matrix44.multiply(model,
+            pyrr.matrix44.create_from_scale(self.scale))
+        
+        return model
+    
+    def draw(self):
+        glBindVertexArray(self.VAO)
+        glDrawElements(GL_TRIANGLES, len(self.indices), GL_UNSIGNED_INT, None)
+
+class NauticRunner:
+    def __init__(self):
+        if not glfw.init():
+            raise Exception("GLFW não pode ser inicializado!")
+        
+        self.width, self.height = 1280, 720
+        self.window = glfw.create_window(self.width, self.height, "Nautic Runner", None, None)
+        
+        if not self.window:
+            glfw.terminate()
+            raise Exception("GLFW window não pode ser criada!")
+        
+        glfw.set_window_pos(self.window, 400, 200)
+        glfw.set_key_callback(self.window, self.key_callback)
+        glfw.make_context_current(self.window)
+        
+        glEnable(GL_DEPTH_TEST)
+        glClearColor(0.1, 0.3, 0.5, 1.0)
+        
+        self.shader = compileProgram(
+            compileShader(vertex_src, GL_VERTEX_SHADER),
+            compileShader(fragment_src, GL_FRAGMENT_SHADER)
+        )
+        
+        # Game state
+        self.player_lane = 1  # 0=esquerda, 1=meio, 2=direita
+        self.player_y = 0.0
+        self.jumping = False
+        self.jump_velocity = 0.0
+        self.game_speed = 0.1
+        self.score = 0
+        self.game_over = False
+        self.using_custom_model = False  # Flag para saber se está usando modelo customizado
+        
+        # Configuração das pistas (lanes)
+        self.lane_positions = [-2.0, 0.0, 2.0]
+        
+        self.setup_game_objects()
+        
+        # Projection matrix
+        self.projection = pyrr.matrix44.create_perspective_projection_matrix(
+            45, self.width/self.height, 0.1, 100
+        )
+        
+        # View matrix (câmera atrás do jogador)
+        self.view = pyrr.matrix44.create_look_at(
+            pyrr.Vector3([0, 3, 8]),
+            pyrr.Vector3([0, 0, 0]),
+            pyrr.Vector3([0, 1, 0])
+        )
+    
+    def setup_game_objects(self):
+        # Tentar carregar modelo externo, caso contrário usar barco padrão
+        try:
+            # ALTERE ESTE CAMINHO PARA O SEU ARQUIVO .OBJ
+            model_path = "Boat/boat.obj"  # <-- Coloque o caminho do seu modelo aqui
+            
+            self.player = ModelObject(model_path, 
+                                     [self.lane_positions[1], 0, 0], 
+                                     color=[0.6, 0.4, 0.2],  # Cor marrom para barco medieval
+                                     scale=1.3)  # Escala bem pequena - ajuste conforme necessário
+            
+            # Ajuste a rotação se necessário
+            # Se os controles estiverem invertidos, ajuste aqui:
+            # - Controles normais: rotation = [0, 0, 0]
+            # - Barco virado 180°: rotation = [0, 180, 0]
+            # - Barco de lado: rotation = [0, 90, 0] ou [0, 270, 0]
+            self.player.rotation = [0, 0, 0]  # <-- AJUSTE AQUI se necessário
+            
+            self.using_custom_model = True
+            print("✓ Modelo externo carregado com sucesso!")
+            print(f"→ Se os controles estiverem invertidos, ajuste 'rotation' em setup_game_objects()")
+            
+        except Exception as e:
+            print(f"✗ Erro ao carregar modelo: {e}")
+            print("→ Usando barco padrão...")
+            
+            # Barco padrão (caso o modelo não carregue)
+            boat_vertices = np.array([
+                -0.4, 0, 0.6,   0.4, 0, 0.6,   0.4, 0, -0.6,  -0.4, 0, -0.6,
+                -0.3, 0.5, 0.4,  0.3, 0.5, 0.4,  0.3, 0.5, -0.4, -0.3, 0.5, -0.4,
+                0, 0.2, 0.8, 0, 0.3, 0.8
+            ], dtype=np.float32)
+            
+            boat_indices = np.array([
+                0,1,2, 0,2,3,  4,5,6, 4,6,7,  0,1,5, 0,5,4,
+                1,2,6, 1,6,5,  2,3,7, 2,7,6,  3,0,4, 3,4,7,
+                1,8,5, 0,8,4
+            ], dtype=np.uint32)
+            
+            self.player = GameObject(boat_vertices, boat_indices, 
+                                    [self.lane_positions[1], 0, 0], [0.2, 0.6, 0.9])
+            self.using_custom_model = False
+        
+        # Água (plano)
+        water_vertices = np.array([
+            -10, -0.5, -100,  10, -0.5, -100,
+            10, -0.5, 100,   -10, -0.5, 100
+        ], dtype=np.float32)
+        
+        water_indices = np.array([0,1,2, 0,2,3], dtype=np.uint32)
+        self.water = GameObject(water_vertices, water_indices, [0,0,0], [0.0, 0.4, 0.7])
+        
+        # Obstáculos (rochas/boias)
+        self.obstacles = []
+        self.spawn_obstacle()
+    
+    def spawn_obstacle(self):
+        lane = random.randint(0, 2)
+        z_pos = 80 + random.randint(0, 30)
+
+        try:
+            enemy_model_path = "Boat/boat.obj"  # <-- ajuste o caminho
+
+            obstacle = ModelObject(
+                enemy_model_path,
+                [self.lane_positions[lane], 0, z_pos],
+                color=[0.7, 0.2, 0.2],   # vermelho inimigo
+                scale=1.2               # ajuste fino
+            )
+
+            # Ajuste de orientação se necessário
+            obstacle.rotation = [0, 180, 0]
+
+        except Exception as e:
+            print("Erro ao carregar modelo inimigo, usando cubo:", e)
+
+            # fallback (se der erro)
+            obstacle_vertices = np.array([
+                -0.5,-0.5,0.5,  0.5,-0.5,0.5,  0.5,0.5,0.5,  -0.5,0.5,0.5,
+                -0.5,-0.5,-0.5, 0.5,-0.5,-0.5, 0.5,0.5,-0.5, -0.5,0.5,-0.5
+            ], dtype=np.float32)
+
+            obstacle_indices = np.array([
+                0,1,2, 0,2,3,  4,5,6, 4,6,7,
+                0,1,5, 0,5,4, 1,2,6, 1,6,5,
+                2,3,7, 2,7,6, 3,0,4, 3,4,7
+            ], dtype=np.uint32)
+
+            obstacle = GameObject(
+                obstacle_vertices,
+                obstacle_indices,
+                [self.lane_positions[lane], 0, z_pos],
+                [0.9, 0.2, 0.2]
+            )
+
+        self.obstacles.append(obstacle)
+
+    
+    def key_callback(self, window, key, scancode, action, mods):
+        if action == glfw.PRESS:
+            if key == glfw.KEY_LEFT and self.player_lane > 0:
+                self.player_lane -= 1
+            elif key == glfw.KEY_RIGHT and self.player_lane < 2:
+                self.player_lane += 1
+            elif key == glfw.KEY_SPACE and not self.jumping:
+                self.jumping = True
+                self.jump_velocity = 0.15
+            elif key == glfw.KEY_R and self.game_over:
+                self.reset_game()
+            
+            # Teclas de DEBUG para ajustar rotação do modelo em tempo real
+            elif key == glfw.KEY_Q:  # Q - Rotacionar -90° em Y
+                self.player.rotation[1] -= 90
+                print(f"Rotação: {self.player.rotation}")
+            elif key == glfw.KEY_E:  # E - Rotacionar +90° em Y
+                self.player.rotation[1] += 90
+                print(f"Rotação: {self.player.rotation}")
+            elif key == glfw.KEY_Z:  # Z - Resetar rotação
+                self.player.rotation = [0, 0, 0]
+                print(f"Rotação resetada: {self.player.rotation}")
+            
+            # Teclas de DEBUG para ajustar escala
+            elif key == glfw.KEY_EQUAL:  # + Aumentar escala
+                self.player.scale = [s * 1.2 for s in self.player.scale]
+                print(f"Escala: {self.player.scale[0]:.4f}")
+            elif key == glfw.KEY_MINUS:  # - Diminuir escala
+                self.player.scale = [s / 1.2 for s in self.player.scale]
+                print(f"Escala: {self.player.scale[0]:.4f}")
+    
+    def reset_game(self):
+        self.player_lane = 1
+        self.player_y = 0.0
+        self.jumping = False
+        self.jump_velocity = 0.0
+        self.game_speed = 0.1
+        self.score = 0
+        self.game_over = False
+        self.obstacles.clear()
+        self.spawn_obstacle()
+    
+    def update(self, dt):
+        if self.game_over:
+            return
+        
+        # Atualizar posição do jogador
+        target_x = self.lane_positions[self.player_lane]
+        self.player.position[0] += (target_x - self.player.position[0]) * 0.20
+        
+        # Pulo
+        if self.jumping:
+            self.player_y += self.jump_velocity
+            self.jump_velocity -= 0.01
+            if self.player_y <= 0:
+                self.player_y = 0
+                self.jumping = False
+                self.jump_velocity = 0
+        
+        self.player.position[1] = self.player_y
+        
+        # Mover obstáculos
+        for obs in self.obstacles:
+            obs.position[2] -= self.game_speed
+
+            distance = obs.position[2]
+            scale = max(0.5, min(1.5, 1.5 - distance * 0.01))
+            obs.scale = [scale, scale, scale]
+
+            # Verificar colisão
+            if not self.jumping and abs(obs.position[2]) < 1.5:
+                if abs(self.player.position[0] - obs.position[0]) < 0.8:
+                    self.game_over = True
+                    print(f"Game Over! Score: {self.score}")
+        
+        # Remover obstáculos que passaram e adicionar novos
+        self.obstacles = [obs for obs in self.obstacles if obs.position[2] > -10]
+        
+        if len(self.obstacles) < 3:
+            self.spawn_obstacle()
+        
+        # Aumentar dificuldade
+        self.game_speed += 0.00005
+        self.score += 1
+    
+    def render(self):
+        glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT)
+        glUseProgram(self.shader)
+        
+        proj_loc = glGetUniformLocation(self.shader, "projection")
+        view_loc = glGetUniformLocation(self.shader, "view")
+        model_loc = glGetUniformLocation(self.shader, "model")
+        
+        glUniformMatrix4fv(proj_loc, 1, GL_FALSE, self.projection)
+        glUniformMatrix4fv(view_loc, 1, GL_FALSE, self.view)
+        
+        # Desenhar água
+        model = self.water.get_model_matrix()
+        glUniformMatrix4fv(model_loc, 1, GL_FALSE, model)
+        self.water.draw()
+        
+        # Desenhar jogador
+        model = self.player.get_model_matrix()
+        glUniformMatrix4fv(model_loc, 1, GL_FALSE, model)
+        self.player.draw()
+        
+        # Desenhar obstáculos
+        for obs in self.obstacles:
+            model = obs.get_model_matrix()
+            glUniformMatrix4fv(model_loc, 1, GL_FALSE, model)
+            obs.draw()
+    
+    def run(self):
+        last_time = glfw.get_time()
+        
+        print("=== NAUTIC RUNNER ===")
+        print("Controles:")
+        print("  SETA ESQUERDA/DIREITA - Mudar de pista")
+        print("  ESPAÇO - Pular")
+        print("  R - Reiniciar (após game over)")
+        print("\nTeclas de DEBUG:")
+        print("  Q/E - Rotacionar modelo (testar orientação)")
+        print("  Z - Resetar rotação")
+        print("  +/- - Ajustar escala do modelo")
+        print("\nDesvie dos obstáculos!")
+        
+        while not glfw.window_should_close(self.window):
+            current_time = glfw.get_time()
+            dt = current_time - last_time
+            last_time = current_time
+            
+            glfw.poll_events()
+            self.update(dt)
+            self.render()
+            glfw.swap_buffers(self.window)
+            
+            glfw.set_window_title(self.window, 
+                f"Nautic Runner - Score: {self.score} {'[GAME OVER - Press R]' if self.game_over else ''}")
+        
         glfw.terminate()
 
 if __name__ == "__main__":
-    main()
+    game = NauticRunner()
+    game.run()
