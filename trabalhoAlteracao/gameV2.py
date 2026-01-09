@@ -7,7 +7,8 @@ from math import sin, cos, radians
 import random
 from PIL import Image
 
-def load_shader_program(vertex_path, fragment_path):
+
+def load_shader(vertex_path, fragment_path):
     with open(vertex_path, 'r') as f:
         vertex_src = f.read()
     with open(fragment_path, 'r') as f:
@@ -43,6 +44,46 @@ def load_texture(path):
     except Exception as e:
         print(f"✗ Erro ao carregar textura {path}: {e}")
         return None
+
+class WaterPlane3D:
+    def __init__(self, size=200):
+        tile = 100
+        s = 200
+        vertices = np.array([
+            -s, 0, -s,   1,1,1,   0, 0,
+             s, 0, -s,   1,1,1,   tile, 0,
+             s, 0,  s,   1,1,1,   tile, tile,
+            -s, 0,  s,   1,1,1,   0, tile,
+        ], dtype=np.float32)
+
+        indices = np.array([0,1,2, 0,2,3], dtype=np.uint32)
+
+        self.VAO = glGenVertexArrays(1)
+        VBO = glGenBuffers(1)
+        EBO = glGenBuffers(1)
+
+        glBindVertexArray(self.VAO)
+
+        glBindBuffer(GL_ARRAY_BUFFER, VBO)
+        glBufferData(GL_ARRAY_BUFFER, vertices.nbytes, vertices, GL_STATIC_DRAW)
+
+        glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, EBO)
+        glBufferData(GL_ELEMENT_ARRAY_BUFFER, indices.nbytes, indices, GL_STATIC_DRAW)
+
+        stride = 8 * 4
+        glEnableVertexAttribArray(0)
+        glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, stride, ctypes.c_void_p(0))
+        glEnableVertexAttribArray(1)
+        glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, stride, ctypes.c_void_p(12))
+        glEnableVertexAttribArray(2)
+        glVertexAttribPointer(2, 2, GL_FLOAT, GL_FALSE, stride, ctypes.c_void_p(24))
+
+        self.texture = load_texture("texture/water_texture.jpg")
+
+    def draw(self):
+        glBindVertexArray(self.VAO)
+        glDrawElements(GL_TRIANGLES, 6, GL_UNSIGNED_INT, None)
+
 
 class GameObject:
     def __init__(self, vertices, indices, position, color):
@@ -379,7 +420,7 @@ class NauticRunner:
         glEnable(GL_DEPTH_TEST)
         glClearColor(0.1, 0.3, 0.5, 1.0)
         
-        self.shader = load_shader_program(
+        self.shader = load_shader(
             "shaders/game-vertex.glsl",
             "shaders/game-fragment.glsl"
         )
@@ -397,6 +438,9 @@ class NauticRunner:
         
         # Configuração das pistas
         self.lane_positions = [-1.0, 0.0, 1.0]
+
+        # AGUA
+        self.water = WaterPlane3D()
         
         self.setup_game_objects()
         
@@ -488,14 +532,6 @@ class NauticRunner:
                                     [self.lane_positions[1], 0, 0], [0.2, 0.6, 0.9])
             self.using_custom_model = False
         
-        # Água
-        water_vertices = np.array([
-            -10, -0.5, -100,  10, -0.5, -100,
-            10, -0.5, 100,   -10, -0.5, 100
-        ], dtype=np.float32)
-        
-        water_indices = np.array([0,1,2, 0,2,3], dtype=np.uint32)
-        self.water = GameObject(water_vertices, water_indices, [0,0,0], [0.0, 0.4, 0.7])
         
         # Obstáculos
         self.obstacles = []
@@ -637,28 +673,40 @@ class NauticRunner:
 
         self.game_speed += 0.00005
         self.score += 1
-
-        # print("Scala = ", obs.scale)
-
     
     def render(self):
         glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT)
         glUseProgram(self.shader)
-        
+
+        time_loc = glGetUniformLocation(self.shader, "time")
+        glUniform1f(time_loc, glfw.get_time())
+
+
         proj_loc = glGetUniformLocation(self.shader, "projection")
         view_loc = glGetUniformLocation(self.shader, "view")
         model_loc = glGetUniformLocation(self.shader, "model")
         use_texture_loc = glGetUniformLocation(self.shader, "useTexture")
-        
+
+        # ===== ÁGUA =====
         glUniformMatrix4fv(proj_loc, 1, GL_FALSE, self.projection)
         glUniformMatrix4fv(view_loc, 1, GL_FALSE, self.view)
-        
-        # Desenhar água
-        glUniform1i(use_texture_loc, 0)
-        model = self.water.get_model_matrix()
+
+        glUniform1i(use_texture_loc, 1)
+        glActiveTexture(GL_TEXTURE0)
+        glBindTexture(GL_TEXTURE_2D, self.water.texture)
+
+        model = pyrr.matrix44.create_from_translation([0, -0.8, 0])
         glUniformMatrix4fv(model_loc, 1, GL_FALSE, model)
+
         self.water.draw()
-        
+
+
+
+
+        # ===== CENA 3D =====
+        glUniformMatrix4fv(proj_loc, 1, GL_FALSE, self.projection)
+        glUniformMatrix4fv(view_loc, 1, GL_FALSE, self.view)
+            
         # Desenhar jogador
         model = self.player.get_model_matrix()
         glUniformMatrix4fv(model_loc, 1, GL_FALSE, model)
@@ -708,10 +756,9 @@ class NauticRunner:
         self.player.position,
         PLAYER_SIZE,
         self.player.scale
-)
+        )
 
-                                                                    
-    
+                                                                
     def run(self):
         last_time = glfw.get_time()
         
