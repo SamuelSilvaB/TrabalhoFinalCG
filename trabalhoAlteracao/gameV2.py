@@ -7,49 +7,17 @@ from math import sin, cos, radians
 import random
 from PIL import Image
 
-# Vertex Shader com suporte a texturas
-vertex_src = """
-# version 330 core
+def load_shader_program(vertex_path, fragment_path):
+    with open(vertex_path, 'r') as f:
+        vertex_src = f.read()
+    with open(fragment_path, 'r') as f:
+        fragment_src = f.read()
 
-layout(location = 0) in vec3 a_position;
-layout(location = 1) in vec3 a_color;
-layout(location = 2) in vec2 a_texCoord;
+    return compileProgram(
+        compileShader(vertex_src, GL_VERTEX_SHADER),
+        compileShader(fragment_src, GL_FRAGMENT_SHADER)
+    )
 
-uniform mat4 model;
-uniform mat4 view;
-uniform mat4 projection;
-
-out vec3 v_color;
-out vec2 v_texCoord;
-
-void main()
-{
-    gl_Position = projection * view * model * vec4(a_position, 1.0);
-    v_color = a_color;
-    v_texCoord = a_texCoord;
-}
-"""
-
-# Fragment Shader com suporte a texturas
-fragment_src = """
-# version 330 core
-
-in vec3 v_color;
-in vec2 v_texCoord;
-out vec4 FragColor;
-
-uniform sampler2D texture1;
-uniform bool useTexture;
-
-void main()
-{
-    if (useTexture) {
-        FragColor = texture(texture1, v_texCoord) * vec4(v_color, 1.0);
-    } else {
-        FragColor = vec4(v_color, 1.0);
-    }
-}
-"""
 
 def load_texture(path):
     """Carrega uma textura de imagem"""
@@ -411,10 +379,11 @@ class NauticRunner:
         glEnable(GL_DEPTH_TEST)
         glClearColor(0.1, 0.3, 0.5, 1.0)
         
-        self.shader = compileProgram(
-            compileShader(vertex_src, GL_VERTEX_SHADER),
-            compileShader(fragment_src, GL_FRAGMENT_SHADER)
+        self.shader = load_shader_program(
+            "shaders/game-vertex.glsl",
+            "shaders/game-fragment.glsl"
         )
+
         
         # Game state
         self.player_lane = 1
@@ -768,7 +737,7 @@ class NauticRunner:
             glfw.swap_buffers(self.window)
             
             glfw.set_window_title(self.window, 
-                f"Nautic Runner - Score: {self.score} {'[GAME OVER - Press R]' if self.game_over else ''}")
+                f"Nautic Runner - BACKUP - Score: {self.score} {'[GAME OVER - Press R]' if self.game_over else ''}")
         
         glfw.terminate()
 
