@@ -562,7 +562,7 @@ class NauticRunner:
                 texture_paths=enemy_texture_paths
             )
             
-            obstacle.rotation = [0, 180, 0]
+            # obstacle.rotation = [0, 0, 0]
             
         except Exception as e:
             print("Erro ao carregar modelo inimigo, usando cubo:", e)
@@ -676,27 +676,29 @@ class NauticRunner:
         glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT)
         glUseProgram(self.shader)
         
+        # Localizações dos uniforms
         proj_loc = glGetUniformLocation(self.shader, "projection")
         view_loc = glGetUniformLocation(self.shader, "view")
         model_loc = glGetUniformLocation(self.shader, "model")
         use_texture_loc = glGetUniformLocation(self.shader, "useTexture")
         
+        # Passar projeção e view (mesmo para todos)
         glUniformMatrix4fv(proj_loc, 1, GL_FALSE, self.projection)
         glUniformMatrix4fv(view_loc, 1, GL_FALSE, self.view)
         
-        # Desenhar água
-        glUniform1i(use_texture_loc, 0)
+        ### DESENHAR ÁGUA ###
+        glUniform1i(use_texture_loc, 0)  # Água não usa textura (ou anima se quiser)
         model = self.water.get_model_matrix()
         glUniformMatrix4fv(model_loc, 1, GL_FALSE, model)
         self.water.draw()
         
-        # Desenhar jogador
+        ### DESENHAR JOGADOR ###
         model = self.player.get_model_matrix()
         glUniformMatrix4fv(model_loc, 1, GL_FALSE, model)
         
-        # Se o player tem materiais (modelo com texturas)
         if hasattr(self.player, 'materials'):
             for material in self.player.materials:
+                # Ativa a textura correta
                 if material['texture_idx'] is not None and material['texture_idx'] < len(self.player.textures):
                     glUniform1i(use_texture_loc, 1)
                     glBindTexture(GL_TEXTURE_2D, self.player.textures[material['texture_idx']])
@@ -706,20 +708,17 @@ class NauticRunner:
                 glBindVertexArray(material['VAO'])
                 glDrawElements(GL_TRIANGLES, material['indices_count'], GL_UNSIGNED_INT, None)
         else:
-            # Modelo simples sem materiais
+            # Caso seja GameObject simples
             glUniform1i(use_texture_loc, 0)
             self.player.draw()
         
-        # Desenhar obstáculos
+        ### DESENHAR OBSTÁCULOS ###
         for obs in self.obstacles:
-            self.draw_hitbox(
-                obs.position,
-                OBSTACLE_SIZE,
-                obs.scale
-            )
-
+            self.draw_hitbox(obs.position, OBSTACLE_SIZE, obs.scale)
             
-            # Se o obstáculo tem materiais
+            model = obs.get_model_matrix()
+            glUniformMatrix4fv(model_loc, 1, GL_FALSE, model)
+            
             if hasattr(obs, 'materials'):
                 for material in obs.materials:
                     if material['texture_idx'] is not None and material['texture_idx'] < len(obs.textures):
@@ -731,15 +730,12 @@ class NauticRunner:
                     glBindVertexArray(material['VAO'])
                     glDrawElements(GL_TRIANGLES, material['indices_count'], GL_UNSIGNED_INT, None)
             else:
-                # Obstáculo simples
                 glUniform1i(use_texture_loc, 0)
                 obs.draw()
-                
-        self.draw_hitbox(
-        self.player.position,
-        PLAYER_SIZE,
-        self.player.scale
-)
+        
+        ### DESENHAR HITBOX DO JOGADOR ###
+        self.draw_hitbox(self.player.position, PLAYER_SIZE, self.player.scale)
+
 
                                                                     
     
