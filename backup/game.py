@@ -7,49 +7,52 @@ from math import sin, cos, radians
 import random
 from PIL import Image
 
-# Vertex Shader com suporte a texturas
-vertex_src = """
-# version 330 core
 
-layout(location = 0) in vec3 a_position;
-layout(location = 1) in vec3 a_color;
-layout(location = 2) in vec2 a_texCoord;
 
-uniform mat4 model;
-uniform mat4 view;
-uniform mat4 projection;
+def load_shader_from_file(path):
+    with open(path, 'r') as file:
+        return file.read()
 
-out vec3 v_color;
-out vec2 v_texCoord;
 
-void main()
-{
-    gl_Position = projection * view * model * vec4(a_position, 1.0);
-    v_color = a_color;
-    v_texCoord = a_texCoord;
-}
-"""
+class WaterPlane3D:
+    def __init__(self, size=200, tile=100):
+        s = 200
 
-# Fragment Shader com suporte a texturas
-fragment_src = """
-# version 330 core
+        vertices = np.array([
+            -size, -0.5, -s,   1,1,1,   0,    0,
+             s, -0.5, -s,   1,1,1,   tile, 0,
+             s, -0.5,  s,   1,1,1,   tile, tile,
+            -s, -0.5,  s,   1,1,1,   0,    tile,
+        ], dtype=np.float32)
 
-in vec3 v_color;
-in vec2 v_texCoord;
-out vec4 FragColor;
+        indices = np.array([0,1,2, 0,2,3], dtype=np.uint32)
 
-uniform sampler2D texture1;
-uniform bool useTexture;
+        self.VAO = glGenVertexArrays(1)
+        VBO = glGenBuffers(1)
+        EBO = glGenBuffers(1)
 
-void main()
-{
-    if (useTexture) {
-        FragColor = texture(texture1, v_texCoord) * vec4(v_color, 1.0);
-    } else {
-        FragColor = vec4(v_color, 1.0);
-    }
-}
-"""
+        glBindVertexArray(self.VAO)
+
+        glBindBuffer(GL_ARRAY_BUFFER, VBO)
+        glBufferData(GL_ARRAY_BUFFER, vertices.nbytes, vertices, GL_STATIC_DRAW)
+
+        glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, EBO)
+        glBufferData(GL_ELEMENT_ARRAY_BUFFER, indices.nbytes, indices, GL_STATIC_DRAW)
+
+        stride = 8 * 4
+        glEnableVertexAttribArray(0)
+        glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, stride, ctypes.c_void_p(0))
+        glEnableVertexAttribArray(1)
+        glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, stride, ctypes.c_void_p(12))
+        glEnableVertexAttribArray(2)
+        glVertexAttribPointer(2, 2, GL_FLOAT, GL_FALSE, stride, ctypes.c_void_p(24))
+
+        self.texture = load_texture("texture/water.jpg")
+
+    def draw(self):
+        glBindVertexArray(self.VAO)
+        glDrawElements(GL_TRIANGLES, 6, GL_UNSIGNED_INT, None)
+
 
 def load_texture(path):
     """Carrega uma textura de imagem"""
@@ -411,10 +414,14 @@ class NauticRunner:
         glEnable(GL_DEPTH_TEST)
         glClearColor(0.1, 0.3, 0.5, 1.0)
         
+        vertex_code = load_shader_from_file("shaders/vertex.glsl")
+        fragment_code = load_shader_from_file("shaders/fragment.glsl")
+
         self.shader = compileProgram(
-            compileShader(vertex_src, GL_VERTEX_SHADER),
-            compileShader(fragment_src, GL_FRAGMENT_SHADER)
+            compileShader(vertex_code, GL_VERTEX_SHADER),
+            compileShader(fragment_code, GL_FRAGMENT_SHADER)
         )
+
         
         # Game state
         self.player_lane = 1
@@ -425,6 +432,8 @@ class NauticRunner:
         self.score = 0
         self.game_over = False
         self.using_custom_model = False
+
+        self.water = WaterPlane3D()
         
         # Configuração das pistas
         self.lane_positions = [-1.0, 0.0, 1.0]
@@ -444,7 +453,7 @@ class NauticRunner:
         )
 
         self.hitbox_vao, self.hitbox_index_count = create_hitbox_vao()
-        self.show_hitboxes = True
+        self.show_hitboxes = False
 
     def draw_hitbox(self, position, size, scale):
         model = pyrr.matrix44.create_identity()
@@ -519,14 +528,49 @@ class NauticRunner:
                                     [self.lane_positions[1], 0, 0], [0.2, 0.6, 0.9])
             self.using_custom_model = False
         
-        # Água
+        # =========================
+        # ÁGUA (PLANO GIGANTE)
+        # =========================
+
+        WATER_SIZE = 300      # tamanho no mundo
+        WATER_TILE = 60       # quantas vezes a textura repete
+
         water_vertices = np.array([
-            -10, -0.5, -100,  10, -0.5, -100,
-            10, -0.5, 100,   -10, -0.5, 100
+            # posição                     cor        UV
+            -WATER_SIZE, -0.5, -WATER_SIZE,  1,1,1,   0, 0,
+            WATER_SIZE, -0.5, -WATER_SIZE,  1,1,1,   WATER_TILE, 0,
+            WATER_SIZE, -0.5,  WATER_SIZE,  1,1,1,   WATER_TILE, WATER_TILE,
+            -WATER_SIZE, -0.5,  WATER_SIZE,  1,1,1,   0, WATER_TILE,
         ], dtype=np.float32)
-        
-        water_indices = np.array([0,1,2, 0,2,3], dtype=np.uint32)
-        self.water = GameObject(water_vertices, water_indices, [0,0,0], [0.0, 0.4, 0.7])
+
+        water_indices = np.array([0, 1, 2, 0, 2, 3], dtype=np.uint32)
+
+        self.water_vao = glGenVertexArrays(1)
+        self.water_vbo = glGenBuffers(1)
+        self.water_ebo = glGenBuffers(1)
+
+        glBindVertexArray(self.water_vao)
+
+        glBindBuffer(GL_ARRAY_BUFFER, self.water_vbo)
+        glBufferData(GL_ARRAY_BUFFER, water_vertices.nbytes, water_vertices, GL_STATIC_DRAW)
+
+        glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, self.water_ebo)
+        glBufferData(GL_ELEMENT_ARRAY_BUFFER, water_indices.nbytes, water_indices, GL_STATIC_DRAW)
+
+        # posição
+        glEnableVertexAttribArray(0)
+        glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 32, ctypes.c_void_p(0))
+
+        # cor
+        glEnableVertexAttribArray(1)
+        glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, 32, ctypes.c_void_p(12))
+
+        # UV
+        glEnableVertexAttribArray(2)
+        glVertexAttribPointer(2, 2, GL_FLOAT, GL_FALSE, 32, ctypes.c_void_p(24))
+
+        self.water_texture = load_texture("texture/water.jpg")
+
         
         # Obstáculos
         self.obstacles = []
@@ -537,7 +581,7 @@ class NauticRunner:
         z_pos = -80 - random.randint(0, 30)
         
         try:
-            enemy_model_path = "Boat/boat.obj"
+            enemy_model_path = "Boat/enemy_boat.obj"
             
             # Mesmas texturas do jogador
             enemy_texture_paths = [
@@ -675,66 +719,77 @@ class NauticRunner:
     def render(self):
         glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT)
         glUseProgram(self.shader)
-        
-        # Localizações dos uniforms
+
+        # -------- uniforms globais --------
+        time_loc = glGetUniformLocation(self.shader, "time")
+        is_water_loc = glGetUniformLocation(self.shader, "isWater")
+        use_texture_loc = glGetUniformLocation(self.shader, "useTexture")
         proj_loc = glGetUniformLocation(self.shader, "projection")
         view_loc = glGetUniformLocation(self.shader, "view")
         model_loc = glGetUniformLocation(self.shader, "model")
-        use_texture_loc = glGetUniformLocation(self.shader, "useTexture")
-        
-        # Passar projeção e view (mesmo para todos)
+
+        glUniform1f(time_loc, glfw.get_time())
         glUniformMatrix4fv(proj_loc, 1, GL_FALSE, self.projection)
         glUniformMatrix4fv(view_loc, 1, GL_FALSE, self.view)
-        
-        ### DESENHAR ÁGUA ###
-        glUniform1i(use_texture_loc, 0)  # Água não usa textura (ou anima se quiser)
-        model = self.water.get_model_matrix()
+
+        # =====================
+        # ÁGUA
+        # =====================
+        glUniform1i(is_water_loc, 1)
+        glUniform1i(use_texture_loc, 1)
+
+        model = pyrr.matrix44.create_identity()
         glUniformMatrix4fv(model_loc, 1, GL_FALSE, model)
+
+        glBindTexture(GL_TEXTURE_2D, self.water.texture)
         self.water.draw()
-        
-        ### DESENHAR JOGADOR ###
+
+        # =====================
+        # JOGADOR
+        # =====================
+        glUniform1i(is_water_loc, 0)
+
         model = self.player.get_model_matrix()
         glUniformMatrix4fv(model_loc, 1, GL_FALSE, model)
-        
+
         if hasattr(self.player, 'materials'):
             for material in self.player.materials:
-                # Ativa a textura correta
-                if material['texture_idx'] is not None and material['texture_idx'] < len(self.player.textures):
+                if material['texture_idx'] is not None:
                     glUniform1i(use_texture_loc, 1)
                     glBindTexture(GL_TEXTURE_2D, self.player.textures[material['texture_idx']])
                 else:
                     glUniform1i(use_texture_loc, 0)
-                
+
                 glBindVertexArray(material['VAO'])
                 glDrawElements(GL_TRIANGLES, material['indices_count'], GL_UNSIGNED_INT, None)
         else:
-            # Caso seja GameObject simples
             glUniform1i(use_texture_loc, 0)
             self.player.draw()
-        
-        ### DESENHAR OBSTÁCULOS ###
+
+        # =====================
+        # OBSTÁCULOS
+        # =====================
+        glUniform1i(is_water_loc, 0)
+
         for obs in self.obstacles:
-            self.draw_hitbox(obs.position, OBSTACLE_SIZE, obs.scale)
-            
             model = obs.get_model_matrix()
             glUniformMatrix4fv(model_loc, 1, GL_FALSE, model)
-            
+
             if hasattr(obs, 'materials'):
                 for material in obs.materials:
-                    if material['texture_idx'] is not None and material['texture_idx'] < len(obs.textures):
+                    if material['texture_idx'] is not None:
                         glUniform1i(use_texture_loc, 1)
                         glBindTexture(GL_TEXTURE_2D, obs.textures[material['texture_idx']])
                     else:
                         glUniform1i(use_texture_loc, 0)
-                    
+
                     glBindVertexArray(material['VAO'])
                     glDrawElements(GL_TRIANGLES, material['indices_count'], GL_UNSIGNED_INT, None)
             else:
                 glUniform1i(use_texture_loc, 0)
                 obs.draw()
-        
-        ### DESENHAR HITBOX DO JOGADOR ###
-        self.draw_hitbox(self.player.position, PLAYER_SIZE, self.player.scale)
+
+
 
 
                                                                     
