@@ -15,6 +15,8 @@ uniform vec3 lightPos;
 uniform vec3 viewPos;
 uniform vec3 lightColor;
 
+uniform float time;
+
 void main()
 {
     vec3 norm = normalize(v_normal);
@@ -39,11 +41,19 @@ void main()
     vec3 specular = specStrength * spec * lightColor;
 
     // -------- COR BASE --------
+    vec2 uv = v_texCoord;
     vec3 baseColor;
+
+    if (isWater) {
+        uv.x += time * 0.05;
+        uv.y += sin(time * 0.5) * 0.02;
+    }
+
     if (useTexture)
-        baseColor = texture(texture1, v_texCoord).rgb;
+        baseColor = texture(texture1, uv).rgb;
     else
         baseColor = v_color;
+
 
     vec3 result = (ambient + diffuse + specular) * baseColor;
     FragColor = vec4(result, 1.0);
