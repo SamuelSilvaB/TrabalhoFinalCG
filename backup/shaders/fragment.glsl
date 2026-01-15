@@ -1,5 +1,7 @@
 #version 330 core
 
+in vec3 v_fragPos;
+in vec3 v_normal;
 in vec3 v_color;
 in vec2 v_texCoord;
 
@@ -7,23 +9,42 @@ out vec4 FragColor;
 
 uniform sampler2D texture1;
 uniform bool useTexture;
-uniform float time;
 uniform bool isWater;
 
+uniform vec3 lightPos;
+uniform vec3 viewPos;
+uniform vec3 lightColor;
 
 void main()
 {
-    vec2 uv = v_texCoord;
+    vec3 norm = normalize(v_normal);
+    vec3 lightDir = normalize(lightPos - v_fragPos);
 
-    if (isWater) {
-        uv.y += time * 0.05;
-        uv.x += sin(time + uv.y) * 0.01;
-    }
+    // -------- AMBIENT --------
+    float ambientStrength = isWater ? 0.3 : 0.15;
+    vec3 ambient = ambientStrength * lightColor;
 
-    if (useTexture) {
-        FragColor = texture(texture1, uv) * vec4(v_color, 1.0);
-    } else {
-        FragColor = vec4(v_color, 1.0);
-    }
+    // -------- DIFFUSE --------
+    float diff = max(dot(norm, lightDir), 0.0);
+    vec3 diffuse = diff * lightColor;
+
+    // -------- SPECULAR --------
+    vec3 viewDir = normalize(viewPos - v_fragPos);
+    vec3 reflectDir = reflect(-lightDir, norm);
+
+    float specStrength = isWater ? 0.8 : 0.4;
+    float shininess   = isWater ? 64.0 : 32.0;
+
+    float spec = pow(max(dot(viewDir, reflectDir), 0.0), shininess);
+    vec3 specular = specStrength * spec * lightColor;
+
+    // -------- COR BASE --------
+    vec3 baseColor;
+    if (useTexture)
+        baseColor = texture(texture1, v_texCoord).rgb;
+    else
+        baseColor = v_color;
+
+    vec3 result = (ambient + diffuse + specular) * baseColor;
+    FragColor = vec4(result, 1.0);
 }
-

@@ -18,11 +18,11 @@ class WaterPlane3D:
     def __init__(self, size=200, tile=100):
         s = 200
 
-        vertices = np.array([
-            -size, -0.5, -s,   1,1,1,   0,    0,
-             s, -0.5, -s,   1,1,1,   tile, 0,
-             s, -0.5,  s,   1,1,1,   tile, tile,
-            -s, -0.5,  s,   1,1,1,   0,    tile,
+        vertices = np.array([       # Cor       #UV         # Normal
+            -size, -0.5, -s,        1,1,1,   0,    0,         0,1,0,  
+             s, -0.5, -s,           1,1,1,   tile, 0,         0,1,0,
+             s, -0.5,  s,           1,1,1,   tile, tile,      0,1,0,
+            -s, -0.5,  s,           1,1,1,   0,    tile,      0,1,0
         ], dtype=np.float32)
 
         indices = np.array([0,1,2, 0,2,3], dtype=np.uint32)
@@ -39,13 +39,23 @@ class WaterPlane3D:
         glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, EBO)
         glBufferData(GL_ELEMENT_ARRAY_BUFFER, indices.nbytes, indices, GL_STATIC_DRAW)
 
-        stride = 8 * 4
+        stride = 11 * 4  # 11 floats
+        # posição
         glEnableVertexAttribArray(0)
         glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, stride, ctypes.c_void_p(0))
+
+        # cor
         glEnableVertexAttribArray(1)
         glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, stride, ctypes.c_void_p(12))
+
+        # uv
         glEnableVertexAttribArray(2)
         glVertexAttribPointer(2, 2, GL_FLOAT, GL_FALSE, stride, ctypes.c_void_p(24))
+
+        # NORMAL (NOVO)
+        glEnableVertexAttribArray(3)
+        glVertexAttribPointer(3, 3, GL_FLOAT, GL_FALSE, stride, ctypes.c_void_p(32))
+
 
         self.texture = load_texture("texture/water.jpg")
 
@@ -175,143 +185,181 @@ class ModelObject:
         self.load_obj_with_materials(obj_path)
     
     def load_obj_with_materials(self, filename):
-        """Carrega arquivo .obj com múltiplos materiais"""
+        """Carrega arquivo .obj com múltiplos materiais, UVs e NORMAIS (Phong-ready)"""
+
         vertices = []
         tex_coords = []
+        normals = []
+
         current_material = "default"
-        material_faces = {}  # {material_name: [faces]}
-        
+        material_faces = {}
+
         print(f"Carregando modelo: {filename}")
-        
+
         try:
             with open(filename, 'r') as file:
                 for line in file:
                     line = line.strip()
-                    
                     if not line or line.startswith('#'):
                         continue
-                    
+
                     parts = line.split()
-                    
-                    # Vértices
+
+                    # --------------------
+                    # POSIÇÃO
+                    # --------------------
                     if parts[0] == 'v':
-                        x, y, z = float(parts[1]), float(parts[2]), float(parts[3])
-                        vertices.append([x, y, z])
-                    
-                    # Coordenadas de textura
+                        vertices.append([
+                            float(parts[1]),
+                            float(parts[2]),
+                            float(parts[3])
+                        ])
+
+                    # --------------------
+                    # UV
+                    # --------------------
                     elif parts[0] == 'vt':
-                        u = float(parts[1])
-                        v = float(parts[2]) if len(parts) > 2 else 0.0
-                        tex_coords.append([u, v])
-                    
-                    # Trocar de material
+                        tex_coords.append([
+                            float(parts[1]),
+                            float(parts[2]) if len(parts) > 2 else 0.0
+                        ])
+
+                    # --------------------
+                    # NORMAL
+                    # --------------------
+                    elif parts[0] == 'vn':
+                        normals.append([
+                            float(parts[1]),
+                            float(parts[2]),
+                            float(parts[3])
+                        ])
+
+                    # --------------------
+                    # MATERIAL
+                    # --------------------
                     elif parts[0] == 'usemtl':
                         current_material = parts[1]
                         if current_material not in material_faces:
                             material_faces[current_material] = []
-                    
-                    # Faces
+
+                    # --------------------
+                    # FACE
+                    # --------------------
                     elif parts[0] == 'f':
                         face = []
+
                         for i in range(1, len(parts)):
                             indices = parts[i].split('/')
-                            vertex_idx = int(indices[0]) - 1
-                            tex_idx = int(indices[1]) - 1 if len(indices) > 1 and indices[1] else 0
-                            face.append((vertex_idx, tex_idx))
-                        
-                        # Triangular e adicionar ao material atual
+
+                            v_idx = int(indices[0]) - 1
+                            vt_idx = int(indices[1]) - 1 if len(indices) > 1 and indices[1] else 0
+                            vn_idx = int(indices[2]) - 1 if len(indices) > 2 and indices[2] else 0
+
+                            face.append((v_idx, vt_idx, vn_idx))
+
+                        # triangulação
                         for i in range(1, len(face) - 1):
-                            material_faces[current_material].append([face[0], face[i], face[i + 1]])
-            
-            print(f"✓ Carregados {len(vertices)} vértices, {len(tex_coords)} UVs")
-            print(f"✓ Materiais encontrados: {list(material_faces.keys())}")
-            
-            # Normalizar vértices
+                            material_faces[current_material].append(
+                                [face[0], face[i], face[i + 1]]
+                            )
+
+            print(f"✓ Vértices: {len(vertices)}, UVs: {len(tex_coords)}, Normais: {len(normals)}")
+            print(f"✓ Materiais: {list(material_faces.keys())}")
+
+            # --------------------
+            # NORMALIZA MODELO
+            # --------------------
             if vertices:
-                vertices_np = np.array(vertices)
-                min_coords = vertices_np.min(axis=0)
-                max_coords = vertices_np.max(axis=0)
-                center = (min_coords + max_coords) / 2
-                size = max_coords - min_coords
-                max_size = max(size)
-                
+                v_np = np.array(vertices)
+                center = (v_np.min(axis=0) + v_np.max(axis=0)) / 2
+                size = v_np.max(axis=0) - v_np.min(axis=0)
+                scale = max(size)
+
                 for i in range(len(vertices)):
-                    vertices[i][0] = (vertices[i][0] - center[0]) / max_size
-                    vertices[i][1] = (vertices[i][1] - center[1]) / max_size
-                    vertices[i][2] = (vertices[i][2] - center[2]) / max_size
-            
+                    vertices[i] = (np.array(vertices[i]) - center) / scale
+
             if not tex_coords:
                 tex_coords = [[0.0, 0.0]]
-            
-            # Criar geometria para cada material
+
+            # --------------------
+            # CRIA VAO POR MATERIAL
+            # --------------------
             for mat_idx, (mat_name, faces) in enumerate(material_faces.items()):
                 vertices_array = []
                 indices_array = []
-                
+
                 for face in faces:
-                    for vertex_data in face:
-                        vertex_idx, tex_idx = vertex_data
-                        if vertex_idx < len(vertices):
-                            # Posição
-                            vertices_array.extend(vertices[vertex_idx])
-                            # Cor
-                            vertices_array.extend(self.color)
-                            # UV
-                            if tex_idx < len(tex_coords):
-                                vertices_array.extend(tex_coords[tex_idx])
-                            else:
-                                vertices_array.extend([0.0, 0.0])
-                            
-                            indices_array.append(len(indices_array))
-                
-                # Criar VAO para este material
+                    for v_idx, vt_idx, vn_idx in face:
+                        # posição
+                        vertices_array.extend(vertices[v_idx])
+
+                        # cor (tint)
+                        vertices_array.extend(self.color)
+
+                        # uv
+                        if vt_idx < len(tex_coords):
+                            vertices_array.extend(tex_coords[vt_idx])
+                        else:
+                            vertices_array.extend([0.0, 0.0])
+
+                        # normal
+                        if vn_idx < len(normals):
+                            vertices_array.extend(normals[vn_idx])
+                        else:
+                            vertices_array.extend([0.0, 1.0, 0.0])
+
+                        indices_array.append(len(indices_array))
+
                 vertices_np = np.array(vertices_array, dtype=np.float32)
                 indices_np = np.array(indices_array, dtype=np.uint32)
-                
+
                 VAO = glGenVertexArrays(1)
                 VBO = glGenBuffers(1)
                 EBO = glGenBuffers(1)
-                
+
                 glBindVertexArray(VAO)
-                
+
                 glBindBuffer(GL_ARRAY_BUFFER, VBO)
                 glBufferData(GL_ARRAY_BUFFER, vertices_np.nbytes, vertices_np, GL_STATIC_DRAW)
-                
+
                 glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, EBO)
                 glBufferData(GL_ELEMENT_ARRAY_BUFFER, indices_np.nbytes, indices_np, GL_STATIC_DRAW)
-                
-                # Posição
+
+                stride = 11 * 4  # 11 floats
+
+                # posição
                 glEnableVertexAttribArray(0)
-                glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 32, ctypes.c_void_p(0))
-                
-                # Cor
+                glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, stride, ctypes.c_void_p(0))
+
+                # cor
                 glEnableVertexAttribArray(1)
-                glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, 32, ctypes.c_void_p(12))
-                
-                # UV
+                glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, stride, ctypes.c_void_p(12))
+
+                # uv
                 glEnableVertexAttribArray(2)
-                glVertexAttribPointer(2, 2, GL_FLOAT, GL_FALSE, 32, ctypes.c_void_p(24))
-                
-                # Decidir qual textura usar para este material
+                glVertexAttribPointer(2, 2, GL_FLOAT, GL_FALSE, stride, ctypes.c_void_p(24))
+
+                # normal
+                glEnableVertexAttribArray(3)
+                glVertexAttribPointer(3, 3, GL_FLOAT, GL_FALSE, stride, ctypes.c_void_p(32))
+
                 texture_idx = min(mat_idx, len(self.textures) - 1) if self.textures else None
-                
+
                 self.materials.append({
                     'name': mat_name,
                     'VAO': VAO,
                     'indices_count': len(indices_np),
                     'texture_idx': texture_idx
                 })
-                
-                print(f"  Material '{mat_name}': {len(faces)} faces, textura #{texture_idx}")
-        
-        except FileNotFoundError:
-            print(f"✗ Arquivo não encontrado: {filename}")
-            raise
+
+                print(f"  • Material '{mat_name}' OK ({len(indices_np)//3} triângulos)")
+
         except Exception as e:
-            print(f"✗ Erro ao carregar modelo: {e}")
+            print("✗ Erro ao carregar OBJ:", e)
             import traceback
             traceback.print_exc()
             raise
+
     
     def get_model_matrix(self):
         model = pyrr.matrix44.create_identity()
@@ -731,6 +779,15 @@ class NauticRunner:
         glUniform1f(time_loc, glfw.get_time())
         glUniformMatrix4fv(proj_loc, 1, GL_FALSE, self.projection)
         glUniformMatrix4fv(view_loc, 1, GL_FALSE, self.view)
+
+        light_pos_loc = glGetUniformLocation(self.shader, "lightPos")
+        view_pos_loc  = glGetUniformLocation(self.shader, "viewPos")
+        light_color_loc = glGetUniformLocation(self.shader, "lightColor")
+
+        glUniform3f(light_pos_loc, 5.0, 5.0, 5.0)
+        glUniform3f(view_pos_loc, 0.0, 3.0, 8.0)  # mesma posição da câmera
+        glUniform3f(light_color_loc, 1.0, 1.0, 1.0)
+
 
         # =====================
         # ÁGUA
