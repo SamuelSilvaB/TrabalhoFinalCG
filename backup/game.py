@@ -7,7 +7,8 @@ from math import sin, cos, radians
 import random
 from PIL import Image
 
-
+from game_object import GameObject
+from collectible import Collectible, CollectibleType
 
 def load_shader_from_file(path):
     with open(path, 'r') as file:
@@ -481,6 +482,16 @@ class NauticRunner:
         self.game_over = False
         self.using_custom_model = False
 
+        self.collectibles = []
+        self.collectible_timer = 0.0
+        self.collectible_interval = 3.0  # segundos
+
+        # Buffs temporários
+        self.active_buff = None        # None | CollectibleType
+        self.buff_timer = 0.0          # tempo restante
+
+
+
         self.water = WaterPlane3D()
         
         # Configuração das pistas
@@ -502,6 +513,47 @@ class NauticRunner:
 
         self.hitbox_vao, self.hitbox_index_count = create_hitbox_vao()
         self.show_hitboxes = False
+
+        self.spawn_collectible()
+
+    def spawn_collectible(self):
+        lane = random.randint(0, 2)
+        z_pos = -40
+
+        is_buff = random.random() < 0.5
+
+        if is_buff:
+            ctype = CollectibleType.BUFF
+            color = [0.2, 1.0, 0.2]   # verde
+        else:
+            ctype = CollectibleType.NERF
+            color = [1.0, 0.2, 0.2]   # vermelho
+
+        vertices = np.array([
+            -0.3,-0.3,0.3,  0.3,-0.3,0.3,  0.3,0.3,0.3,  -0.3,0.3,0.3,
+            -0.3,-0.3,-0.3, 0.3,-0.3,-0.3, 0.3,0.3,-0.3, -0.3,0.3,-0.3
+        ], dtype=np.float32)
+
+        indices = np.array([
+            0,1,2, 0,2,3,
+            4,5,6, 4,6,7,
+            0,1,5, 0,5,4,
+            1,2,6, 1,6,5,
+            2,3,7, 2,7,6,
+            3,0,4, 3,4,7
+        ], dtype=np.uint32)
+
+        item = Collectible(
+            vertices,
+            indices,
+            [self.lane_positions[lane], 0.3, z_pos],
+            color,
+            ctype
+        )
+        item.scale = [2.3, 2.3, 2.3]
+
+        self.collectibles.append(item)
+
 
     def draw_hitbox(self, position, size, scale):
         model = pyrr.matrix44.create_identity()
@@ -758,6 +810,60 @@ class NauticRunner:
         if len(self.obstacles) < 3:
             self.spawn_obstacle()
 
+        for item in self.collectibles[:]:
+            item.position[2] += self.game_speed
+
+            if aabb_collision(
+                self.player.position, PLAYER_SIZE,
+                item.position, np.array([0.6, 0.6, 0.6])
+            ):
+                # Se já houver buff ativo, remove antes
+                if self.active_buff is not None:
+                    if self.active_buff == CollectibleType.BUFF:
+                        self.game_speed -= 0.05
+                    elif self.active_buff == CollectibleType.NERF:
+                        self.game_speed += 0.05
+
+                if item.type == CollectibleType.BUFF:
+                    self.active_buff = CollectibleType.BUFF
+                    self.buff_timer = 5.0          # 5 segundos
+                    self.game_speed += 0.05
+                else:
+                    self.active_buff = CollectibleType.NERF
+                    self.buff_timer = 3.0          # 3 segundos
+                    self.game_speed = max(0.05, self.game_speed - 0.05)
+
+                self.collectibles.remove(item)
+
+
+        # remover coletáveis que passaram da câmera
+        self.collectibles = [
+            item for item in self.collectibles
+            if item.position[2] < 10
+        ]
+
+        self.collectible_timer += dt
+        if self.collectible_timer >= self.collectible_interval:
+            self.spawn_collectible()
+            self.collectible_timer = 0.0
+
+        # =========================
+        # ATUALIZAR BUFF TEMPORÁRIO
+        # =========================
+        if self.active_buff is not None:
+            self.buff_timer -= dt
+
+            if self.buff_timer <= 0:
+                # Reverter efeito
+                if self.active_buff == CollectibleType.BUFF:
+                    self.game_speed -= 0.05
+                elif self.active_buff == CollectibleType.NERF:
+                    self.game_speed += 0.05
+
+                self.active_buff = None
+                self.buff_timer = 0.0
+
+
         self.game_speed += 0.00005
         self.score += 1
 
@@ -806,6 +912,14 @@ class NauticRunner:
         # =====================
         glUniform1i(is_water_loc, 0)
 
+        # 🎨 luz especial APENAS para o jogador
+        if self.active_buff == CollectibleType.BUFF:
+            glUniform3f(light_color_loc, 0.6, 1.0, 0.6)
+        elif self.active_buff == CollectibleType.NERF:
+            glUniform3f(light_color_loc, 1.0, 0.6, 0.6)
+        else:
+            glUniform3f(light_color_loc, 1.0, 1.0, 1.0)
+
         model = self.player.get_model_matrix()
         glUniformMatrix4fv(model_loc, 1, GL_FALSE, model)
 
@@ -822,6 +936,9 @@ class NauticRunner:
         else:
             glUniform1i(use_texture_loc, 0)
             self.player.draw()
+
+        # 🔄 restaura luz padrão para o resto da cena
+        glUniform3f(light_color_loc, 1.0, 1.0, 1.0)
 
         # =====================
         # OBSTÁCULOS
@@ -846,11 +963,48 @@ class NauticRunner:
                 glUniform1i(use_texture_loc, 0)
                 obs.draw()
 
+        for item in self.collectibles:
+            model = item.get_model_matrix()
+            glUniformMatrix4fv(model_loc, 1, GL_FALSE, model)
+            glUniform1i(use_texture_loc, 0)
+            item.draw()
 
+        if self.active_buff is not None:
+            glUseProgram(0)
+            glDisable(GL_DEPTH_TEST)
 
+            glMatrixMode(GL_PROJECTION)
+            glPushMatrix()
+            glLoadIdentity()
+            glOrtho(0, self.width, 0, self.height, -1, 1)
 
-                                                                    
-    
+            glMatrixMode(GL_MODELVIEW)
+            glPushMatrix()
+            glLoadIdentity()
+
+            # cor da barra
+            if self.active_buff == CollectibleType.BUFF:
+                glColor3f(0.2, 1.0, 0.2)
+            else:
+                glColor3f(1.0, 0.2, 0.2)
+
+            max_width = 200
+            width = max_width * (self.buff_timer / 5.0)
+
+            glBegin(GL_QUADS)
+            glVertex2f(20, self.height - 40)
+            glVertex2f(20 + width, self.height - 40)
+            glVertex2f(20 + width, self.height - 20)
+            glVertex2f(20, self.height - 20)
+            glEnd()
+
+            glPopMatrix()
+            glMatrixMode(GL_PROJECTION)
+            glPopMatrix()
+            glMatrixMode(GL_MODELVIEW)
+
+            glEnable(GL_DEPTH_TEST)
+                                                               
     def run(self):
         last_time = glfw.get_time()
         
@@ -875,8 +1029,18 @@ class NauticRunner:
             self.render()
             glfw.swap_buffers(self.window)
             
-            glfw.set_window_title(self.window, 
-                f"Nautic Runner - BACKUP - Score: {self.score} {'[GAME OVER - Press R]' if self.game_over else ''}")
+            buff_text = ""
+            if self.active_buff == CollectibleType.BUFF:
+                buff_text = f" | BUFF {self.buff_timer:.1f}s"
+            elif self.active_buff == CollectibleType.NERF:
+                buff_text = f" | NERF {self.buff_timer:.1f}s"
+
+            glfw.set_window_title(
+                self.window,
+                f"Nautic Runner | Score: {self.score} | Speed: {self.game_speed:.2f}{buff_text}"
+                + (" | GAME OVER (R)" if self.game_over else "")
+            )
+
         
         glfw.terminate()
 
