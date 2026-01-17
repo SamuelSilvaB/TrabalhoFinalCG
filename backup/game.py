@@ -482,6 +482,10 @@ class NauticRunner:
         self.game_over = False
         self.using_custom_model = False
 
+        # ===== BUFF / NERF STATE =====
+        self.score_multiplier = 1.0
+        self.invert_controls = False
+        
         self.collectibles = []
         self.collectible_timer = 0.0
         self.collectible_interval = 3.0  # segundos
@@ -732,31 +736,32 @@ class NauticRunner:
         self.obstacles.append(obstacle)
     
     def key_callback(self, window, key, scancode, action, mods):
-        if action == glfw.PRESS:
-            if key == glfw.KEY_LEFT and self.player_lane > 0:
-                self.player_lane -= 1
-            elif key == glfw.KEY_RIGHT and self.player_lane < 2:
-                self.player_lane += 1
-            elif key == glfw.KEY_SPACE and not self.jumping:
-                self.jumping = True
-                self.jump_velocity = 0.15
-            elif key == glfw.KEY_R and self.game_over:
-                self.reset_game()
-            elif key == glfw.KEY_Q:
-                self.player.rotation[1] -= 90
-                print(f"Rotação: {self.player.rotation}")
-            elif key == glfw.KEY_E:
-                self.player.rotation[1] += 90
-                print(f"Rotação: {self.player.rotation}")
-            elif key == glfw.KEY_Z:
-                self.player.rotation = [0, 0, 0]
-                print(f"Rotação resetada: {self.player.rotation}")
-            elif key == glfw.KEY_EQUAL:
-                self.player.scale = [s * 1.2 for s in self.player.scale]
-                print(f"Escala: {self.player.scale[0]:.4f}")
-            elif key == glfw.KEY_MINUS:
-                self.player.scale = [s / 1.2 for s in self.player.scale]
-                print(f"Escala: {self.player.scale[0]:.4f}")
+        if action != glfw.PRESS:
+            return
+
+        direction = 0
+
+        if key == glfw.KEY_LEFT:
+            direction = -1
+        elif key == glfw.KEY_RIGHT:
+            direction = 1
+        elif key == glfw.KEY_SPACE and not self.jumping:
+            self.jumping = True
+            self.jump_velocity = 0.15
+            return
+        elif key == glfw.KEY_R and self.game_over:
+            self.reset_game()
+            return
+        else:
+            return
+
+        if self.invert_controls:
+            direction *= -1
+
+        new_lane = self.player_lane + direction
+        if 0 <= new_lane <= 2:
+            self.player_lane = new_lane
+
     
     def reset_game(self):
         self.player_lane = 1
@@ -817,21 +822,23 @@ class NauticRunner:
                 self.player.position, PLAYER_SIZE,
                 item.position, np.array([0.6, 0.6, 0.6])
             ):
-                # Se já houver buff ativo, remove antes
-                if self.active_buff is not None:
-                    if self.active_buff == CollectibleType.BUFF:
-                        self.game_speed -= 0.05
-                    elif self.active_buff == CollectibleType.NERF:
-                        self.game_speed += 0.05
+                
+                # remove buff anterior
+                if self.active_buff == CollectibleType.BUFF:
+                    self.score_multiplier = 1.0
+                elif self.active_buff == CollectibleType.NERF:
+                    self.invert_controls = False
+
+                # aplica novo
+                self.active_buff = item.type
 
                 if item.type == CollectibleType.BUFF:
-                    self.active_buff = CollectibleType.BUFF
-                    self.buff_timer = 5.0          # 5 segundos
-                    self.game_speed += 0.05
-                else:
-                    self.active_buff = CollectibleType.NERF
-                    self.buff_timer = 3.0          # 3 segundos
-                    self.game_speed = max(0.05, self.game_speed - 0.05)
+                    self.buff_timer = 6.0
+                    self.score_multiplier = 2.0   # ⭐ DOBRA SCORE
+                elif item.type == CollectibleType.NERF:
+                    self.buff_timer = 5.0
+                    self.invert_controls = True   # 🔄 INVERTE CONTROLES
+
 
                 self.collectibles.remove(item)
 
@@ -854,18 +861,20 @@ class NauticRunner:
             self.buff_timer -= dt
 
             if self.buff_timer <= 0:
-                # Reverter efeito
                 if self.active_buff == CollectibleType.BUFF:
-                    self.game_speed -= 0.05
+                    self.score_multiplier = 1.0
                 elif self.active_buff == CollectibleType.NERF:
-                    self.game_speed += 0.05
+                    self.invert_controls = False
 
                 self.active_buff = None
                 self.buff_timer = 0.0
 
 
+
         self.game_speed += 0.00005
-        self.score += 1
+        self.score += int(1 * self.score_multiplier)
+        self.game_speed = max(self.game_speed, 0.02)
+
 
         # print("Scala = ", obs.scale)
 
