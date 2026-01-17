@@ -14,6 +14,188 @@ def load_shader_from_file(path):
     with open(path, 'r') as file:
         return file.read()
 
+def create_star_3d(outer_radius=0.4, inner_radius=0.2, depth=0.15, points=5):
+    """Cria uma estrela 3D perfeita com normais corretas"""
+    vertices = []
+    indices = []
+    
+    angle_step = 2 * np.pi / points
+    
+    # ========================================
+    # CRIAR VÉRTICES DA ESTRELA
+    # ========================================
+    
+    # Vértices da face frontal
+    for i in range(points * 2):
+        angle = i * angle_step / 2
+        
+        if i % 2 == 0:  # Ponta externa
+            radius = outer_radius
+        else:  # Reentrância interna
+            radius = inner_radius
+        
+        x = radius * np.cos(angle - np.pi/2)  # -90° para começar no topo
+        y = radius * np.sin(angle - np.pi/2)
+        z = depth
+        
+        vertices.extend([x, y, z])
+    
+    # Vértices da face traseira (mesmas posições, Z invertido)
+    num_front = (points * 2) * 3
+    for i in range(0, num_front, 3):
+        vertices.extend([vertices[i], vertices[i+1], -depth])
+    
+    # Centro frontal
+    center_front_idx = len(vertices) // 3
+    vertices.extend([0, 0, depth])
+    
+    # Centro traseiro
+    center_back_idx = len(vertices) // 3
+    vertices.extend([0, 0, -depth])
+    
+    # ========================================
+    # CRIAR ÍNDICES (FACES)
+    # ========================================
+    
+    num_points = points * 2
+    
+    # Face FRONTAL (triângulos do centro para fora)
+    for i in range(num_points):
+        next_i = (i + 1) % num_points
+        indices.extend([center_front_idx, i, next_i])
+    
+    # Face TRASEIRA (triângulos do centro para fora, ordem invertida)
+    offset = num_points
+    for i in range(num_points):
+        next_i = (i + 1) % num_points
+        indices.extend([center_back_idx, offset + next_i, offset + i])
+    
+    # LATERAIS (conectar frente e trás)
+    for i in range(num_points):
+        next_i = (i + 1) % num_points
+        
+        # Dois triângulos formam um quad lateral
+        indices.extend([i, next_i, offset + i])
+        indices.extend([next_i, offset + next_i, offset + i])
+    
+    return np.array(vertices, dtype=np.float32), np.array(indices, dtype=np.uint32)
+
+
+class StarObject:
+    """Objeto estrela 3D aprimorado"""
+    def __init__(self, position, outer_radius=0.4, inner_radius=0.2, depth=0.15, 
+                 points=5, color=[1, 1, 0], scale=1.0):
+        self.position = np.array(position, dtype=np.float32)
+        self.rotation = [0, 0, 0]
+        
+        if isinstance(scale, (int, float)):
+            self.scale = [scale, scale, scale]
+        else:
+            self.scale = list(scale)
+        
+        self.color = color
+        self.outer_radius = outer_radius
+        self.inner_radius = inner_radius
+        self.depth = depth
+        self.points = points
+        
+        self.setup_mesh()
+    
+    def setup_mesh(self):
+        vertices_raw, indices = create_star_3d(
+            self.outer_radius, 
+            self.inner_radius, 
+            self.depth, 
+            self.points
+        )
+        
+        self.indices_count = len(indices)
+        
+        # Construir array completo: posição + cor + normal + UV
+        colored_vertices = []
+        
+        # Processar cada vértice
+        for i in range(0, len(vertices_raw), 3):
+            x, y, z = vertices_raw[i], vertices_raw[i+1], vertices_raw[i+2]
+            
+            # Posição
+            colored_vertices.extend([x, y, z])
+            
+            # Cor
+            colored_vertices.extend(self.color)
+            
+            # Normal (apontando para fora da estrela)
+            # Para vértices nas bordas, normal aponta radialmente
+            if abs(z) > 0.001:  # Frente ou trás
+                # Normal aponta para frente/trás
+                colored_vertices.extend([0, 0, 1 if z > 0 else -1])
+            else:
+                # Normal lateral
+                length = np.sqrt(x*x + y*y) + 0.001
+                colored_vertices.extend([x/length, y/length, 0])
+            
+            # UV (mapeamento planar simples)
+            u = (x / (self.outer_radius * 2) + 0.5)
+            v = (y / (self.outer_radius * 2) + 0.5)
+            colored_vertices.extend([u, v])
+        
+        vertices_array = np.array(colored_vertices, dtype=np.float32)
+        
+        # Criar buffers OpenGL
+        self.VAO = glGenVertexArrays(1)
+        VBO = glGenBuffers(1)
+        EBO = glGenBuffers(1)
+        
+        glBindVertexArray(self.VAO)
+        
+        glBindBuffer(GL_ARRAY_BUFFER, VBO)
+        glBufferData(GL_ARRAY_BUFFER, vertices_array.nbytes, vertices_array, GL_STATIC_DRAW)
+        
+        glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, EBO)
+        glBufferData(GL_ELEMENT_ARRAY_BUFFER, indices.nbytes, indices, GL_STATIC_DRAW)
+        
+        stride = 11 * 4  # pos(3) + cor(3) + normal(3) + uv(2)
+        
+        # Posição
+        glEnableVertexAttribArray(0)
+        glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, stride, ctypes.c_void_p(0))
+        
+        # Cor
+        glEnableVertexAttribArray(1)
+        glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, stride, ctypes.c_void_p(12))
+        
+        # Normal
+        glEnableVertexAttribArray(2)
+        glVertexAttribPointer(2, 3, GL_FLOAT, GL_FALSE, stride, ctypes.c_void_p(24))
+        
+        # UV
+        glEnableVertexAttribArray(3)
+        glVertexAttribPointer(3, 2, GL_FLOAT, GL_FALSE, stride, ctypes.c_void_p(36))
+    
+    def get_model_matrix(self):
+        model = pyrr.matrix44.create_identity()
+        
+        model = pyrr.matrix44.multiply(model, 
+            pyrr.matrix44.create_from_translation(self.position))
+        
+        if self.rotation[1] != 0:
+            model = pyrr.matrix44.multiply(model,
+                pyrr.matrix44.create_from_y_rotation(radians(self.rotation[1])))
+        if self.rotation[0] != 0:
+            model = pyrr.matrix44.multiply(model,
+                pyrr.matrix44.create_from_x_rotation(radians(self.rotation[0])))
+        if self.rotation[2] != 0:
+            model = pyrr.matrix44.multiply(model,
+                pyrr.matrix44.create_from_z_rotation(radians(self.rotation[2])))
+        
+        model = pyrr.matrix44.multiply(model,
+            pyrr.matrix44.create_from_scale(self.scale))
+        
+        return model
+    
+    def draw(self):
+        glBindVertexArray(self.VAO)
+        glDrawElements(GL_TRIANGLES, self.indices_count, GL_UNSIGNED_INT, None)
 
 class WaterPlane3D:
     def __init__(self, size=200, tile=100):
@@ -523,40 +705,34 @@ class NauticRunner:
     def spawn_collectible(self):
         lane = random.randint(0, 2)
         z_pos = -40
+        x_pos = self.lane_positions[lane]
 
-        is_buff = random.random() < 0.5
-
-        if is_buff:
+        if random.random() < 0.5:
+            # ===== BUFF (Estrela Dourada) =====
+            model = StarObject(
+                position=[x_pos, 0.5, z_pos],
+                outer_radius=0.4,
+                inner_radius=0.18,
+                depth=0.12,
+                points=5,
+                color=[1.0, 0.84, 0.0]  # Dourado
+            )
+            model.scale = [2.2, 2.2, 2.2]
             ctype = CollectibleType.BUFF
-            color = [0.2, 1.0, 0.2]   # verde
         else:
+            # ===== NERF (Estrela Vermelha/Preta) =====
+            model = StarObject(
+                position=[x_pos, 0.5, z_pos],
+                outer_radius=0.35,
+                inner_radius=0.16,
+                depth=0.1,
+                points=6,  # 6 pontas para diferenciar
+                color=[0.9, 0.1, 0.1]  # Vermelho escuro
+            )
+            model.scale = [2.2, 2.2, 2.2]
             ctype = CollectibleType.NERF
-            color = [1.0, 0.2, 0.2]   # vermelho
 
-        vertices = np.array([
-            -0.3,-0.3,0.3,  0.3,-0.3,0.3,  0.3,0.3,0.3,  -0.3,0.3,0.3,
-            -0.3,-0.3,-0.3, 0.3,-0.3,-0.3, 0.3,0.3,-0.3, -0.3,0.3,-0.3
-        ], dtype=np.float32)
-
-        indices = np.array([
-            0,1,2, 0,2,3,
-            4,5,6, 4,6,7,
-            0,1,5, 0,5,4,
-            1,2,6, 1,6,5,
-            2,3,7, 2,7,6,
-            3,0,4, 3,4,7
-        ], dtype=np.uint32)
-
-        item = Collectible(
-            vertices,
-            indices,
-            [self.lane_positions[lane], 0.3, z_pos],
-            color,
-            ctype
-        )
-        item.scale = [2.3, 2.3, 2.3]
-
-        self.collectibles.append(item)
+        self.collectibles.append(Collectible(model, ctype))
 
 
     def draw_hitbox(self, position, size, scale):
@@ -605,7 +781,7 @@ class NauticRunner:
             self.player = ModelObject(model_path, 
                                      [self.lane_positions[1], 0, 0], 
                                      color=[1.0, 1.0, 1.0],
-                                     scale=2.3,
+                                     scale=3.3,
                                      texture_paths=texture_paths)
             
             self.player.rotation = [0, 0, 0]
@@ -706,7 +882,7 @@ class NauticRunner:
                 enemy_model_path,
                 [self.lane_positions[lane], 0, z_pos],
                 color=random.choice(colors),
-                scale=2.3,
+                scale=3.3,
                 texture_paths=enemy_texture_paths
             )
             
@@ -972,10 +1148,15 @@ class NauticRunner:
                 glUniform1i(use_texture_loc, 0)
                 obs.draw()
 
+        # =====================
+        # COLETÁVEIS
+        # =====================
+        glUniform1i(is_water_loc, 0)
+        glUniform1i(use_texture_loc, 0)  # Estrelas não usam textura
+
         for item in self.collectibles:
             model = item.get_model_matrix()
             glUniformMatrix4fv(model_loc, 1, GL_FALSE, model)
-            glUniform1i(use_texture_loc, 0)
             item.draw()
 
         if self.active_buff is not None:
